@@ -1,4 +1,4 @@
-FROM andrius/asterisk:20-alpine
+FROM andrius/asterisk:20.18.2_debian-trixie
 
 COPY config/pjsip.conf /etc/asterisk/pjsip.conf
 COPY config/extensions.conf /etc/asterisk/extensions.conf
