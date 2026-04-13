@@ -1,23 +1,27 @@
 """
-Service d'appels sortants via Asterisk ARI + OpenAI Realtime WebSocket.
+Appels sortants via Asterisk ARI + OpenAI Realtime.
 
-Architecture :
-1. Python se connecte au WebSocket ARI (enregistre l'app Stasis)
-2. Python demande à Asterisk (via ARI REST) de créer un ExternalMedia channel
-3. Python demande à Asterisk de passer l'appel SIP sortant via DIDWW
-4. Quand l'appel est décroché, Asterisk bridge les deux channels
-5. L'audio RTP du ExternalMedia arrive en UDP vers notre service
-6. On bridge cet audio RTP ↔ OpenAI Realtime WebSocket
-7. OpenAI gère la conversation + function calling
-8. On met à jour les statuts en DB
+Architecture documentée (sources) :
+- Asterisk ARI docs: Getting Started, ExternalMedia
+- ari-py originate_example.py, bridge-move.py
+- thevysh/AsteriskOpenAIRealtimeAssistant (ari.py, main.py, realtime.py)
+
+Flow :
+1. WebSocket ARI → enregistre l'app Stasis, écoute les events en background
+2. POST /channels/externalMedia → crée le canal RTP (audio bidirectionnel)
+3. GET /channels/{id}/variable → récupère UNICASTRTP_LOCAL_ADDRESS/PORT
+4. POST /channels → originate l'appel sortant vers DIDWW
+5. StasisStart event sur le canal sortant = appel décroché
+6. POST /bridges + addChannel → bridge les deux canaux
+7. UDP RTP ↔ OpenAI Realtime WebSocket (audio bidirectionnel)
 """
 
 import asyncio
 import base64
 import json
 import logging
-import struct
 import socket
+import struct
 from datetime import datetime, timezone
 
 import httpx
@@ -29,9 +33,12 @@ from app.prompts.rent_reminder import get_system_prompt, get_tools_definition
 
 logger = logging.getLogger(__name__)
 
+# RTP constants for ulaw (G.711 μ-law)
+RTP_PAYLOAD_ULAW = 0
+RTP_SAMPLES_PER_FRAME = 160  # 8000 Hz * 20ms
+
 
 async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
-    """Lance un appel sortant vers un locataire via Asterisk ARI."""
     db = get_supabase()
     settings = get_settings()
 
@@ -51,190 +58,258 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
         ari_url = settings.asterisk_ari_url
         ari_user = settings.asterisk_ari_user
         ari_pass = settings.asterisk_ari_password
+        caller_id = agency.get("caller_id") or settings.caller_id
 
-        rtp_port = _get_free_udp_port()
+        listen_port = _get_free_udp_port()
 
-        ari_ws_url = ari_url.replace("http://", "ws://").replace("https://", "wss://")
-        ari_ws_url = f"{ari_ws_url}/events?api_key={ari_user}:{ari_pass}&app=outcallsai&subscribeAll=true"
+        # -- Coordination events --
+        call_answered = asyncio.Event()
+        call_ended = asyncio.Event()
+        call_failed_before_answer = False
 
-        logger.info(f"Connecting to ARI WebSocket: {ari_url}/events")
-        async with websockets.connect(ari_ws_url) as ari_ws:
-            logger.info("ARI WebSocket connected, Stasis app 'outcallsai' registered")
+        outbound_id = None
+        ext_media_id = None
 
-            await asyncio.sleep(0.5)
+        # -- ARI event handler (runs in background task) --
+        async def on_ari_event(event: dict):
+            nonlocal call_failed_before_answer
+            evt_type = event.get("type", "")
+            ch_id = event.get("channel", {}).get("id", "")
 
-            async with httpx.AsyncClient(timeout=10) as http:
-                ext_media_resp = await http.post(
-                    f"{ari_url}/channels/externalMedia",
-                    auth=(ari_user, ari_pass),
-                    json={
-                        "app": "outcallsai",
-                        "external_host": f"127.0.0.1:{rtp_port}",
-                        "format": "ulaw",
-                    },
+            logger.info(f"ARI event: {evt_type} | channel={ch_id[:20] if ch_id else 'N/A'}")
+
+            if evt_type == "StasisStart" and ch_id == outbound_id:
+                logger.info(f"Outbound channel answered! Creating bridge...")
+                try:
+                    async with httpx.AsyncClient(timeout=10) as http:
+                        # Doc: POST /bridges?type=mixing (query param)
+                        br = await http.post(
+                            f"{ari_url}/bridges",
+                            auth=(ari_user, ari_pass),
+                            params={"type": "mixing"},
+                        )
+                        if br.status_code >= 300:
+                            logger.error(f"Bridge create failed: {br.status_code} {br.text}")
+                            return
+                        bridge_id = br.json()["id"]
+
+                        # Doc: POST /bridges/{id}/addChannel?channel=id1,id2
+                        add = await http.post(
+                            f"{ari_url}/bridges/{bridge_id}/addChannel",
+                            auth=(ari_user, ari_pass),
+                            params={"channel": f"{outbound_id},{ext_media_id}"},
+                        )
+                        if add.status_code >= 300:
+                            logger.error(f"Bridge addChannel failed: {add.status_code} {add.text}")
+                            return
+
+                    logger.info(f"Bridge {bridge_id} created with both channels")
+                    call_answered.set()
+                except Exception as e:
+                    logger.error(f"Error during bridge creation: {e}")
+
+            elif evt_type == "ChannelDestroyed" and ch_id == outbound_id:
+                logger.info(f"Outbound channel destroyed")
+                if not call_answered.is_set():
+                    call_failed_before_answer = True
+                    call_answered.set()
+                call_ended.set()
+
+            elif evt_type == "StasisEnd" and ch_id == outbound_id:
+                logger.info(f"Outbound channel left Stasis")
+                call_ended.set()
+
+        # -- 1. Connect ARI WebSocket (registers Stasis app) --
+        # Doc: wscat -c "ws://localhost:8088/ari/events?api_key=user:pass&app=myapp"
+        ari_ws_url = (
+            f"ws://localhost:8088/ari/events"
+            f"?api_key={ari_user}:{ari_pass}"
+            f"&app=outcallsai"
+            f"&subscribeAll=true"
+        )
+        logger.info("Connecting to ARI WebSocket...")
+
+        async with websockets.connect(ari_ws_url) as ws:
+            logger.info("ARI WebSocket connected, Stasis app registered")
+
+            # Background task to process ARI events for the duration of the call
+            async def event_loop():
+                try:
+                    async for raw_msg in ws:
+                        try:
+                            event = json.loads(raw_msg)
+                            await on_ari_event(event)
+                        except json.JSONDecodeError:
+                            continue
+                except websockets.ConnectionClosed:
+                    logger.warning("ARI WebSocket closed by server")
+                except Exception as e:
+                    logger.error(f"ARI event loop error: {e}")
+
+            event_task = asyncio.create_task(event_loop())
+
+            try:
+                async with httpx.AsyncClient(timeout=15) as http:
+
+                    # -- 2. Create ExternalMedia channel --
+                    # Doc: POST /channels/externalMedia?app=...&external_host=...&format=ulaw
+                    logger.info(f"Creating ExternalMedia on port {listen_port}...")
+                    em_resp = await http.post(
+                        f"{ari_url}/channels/externalMedia",
+                        auth=(ari_user, ari_pass),
+                        params={
+                            "app": "outcallsai",
+                            "external_host": f"127.0.0.1:{listen_port}",
+                            "format": "ulaw",
+                        },
+                    )
+                    if em_resp.status_code >= 300:
+                        raise RuntimeError(f"ExternalMedia failed ({em_resp.status_code}): {em_resp.text}")
+
+                    em = em_resp.json()
+                    ext_media_id = em["id"]
+                    logger.info(f"ExternalMedia channel: {ext_media_id}")
+
+                    # -- 3. Get UNICASTRTP_LOCAL_ADDRESS/PORT --
+                    # Doc: "chan_rtp sets UNICASTRTP_LOCAL_ADDRESS and UNICASTRTP_LOCAL_PORT"
+                    addr_resp = await http.get(
+                        f"{ari_url}/channels/{ext_media_id}/variable",
+                        auth=(ari_user, ari_pass),
+                        params={"variable": "UNICASTRTP_LOCAL_ADDRESS"},
+                    )
+                    port_resp = await http.get(
+                        f"{ari_url}/channels/{ext_media_id}/variable",
+                        auth=(ari_user, ari_pass),
+                        params={"variable": "UNICASTRTP_LOCAL_PORT"},
+                    )
+
+                    if addr_resp.status_code >= 300 or port_resp.status_code >= 300:
+                        raise RuntimeError(
+                            f"Failed to get UNICASTRTP vars: "
+                            f"addr={addr_resp.status_code} port={port_resp.status_code}"
+                        )
+
+                    asterisk_rtp_addr = addr_resp.json()["value"]
+                    asterisk_rtp_port = int(port_resp.json()["value"])
+                    logger.info(f"Asterisk RTP endpoint: {asterisk_rtp_addr}:{asterisk_rtp_port}")
+
+                    # -- 4. Originate outbound call --
+                    # Doc: POST /channels?endpoint=...&app=...&callerId=...
+                    logger.info(f"Originating call to {dial_number} via DIDWW...")
+                    call_resp = await http.post(
+                        f"{ari_url}/channels",
+                        auth=(ari_user, ari_pass),
+                        params={
+                            "endpoint": f"PJSIP/{dial_number}@didww-endpoint",
+                            "app": "outcallsai",
+                            "appArgs": "dialed",
+                            "callerId": caller_id,
+                            "timeout": 30,
+                        },
+                    )
+                    if call_resp.status_code >= 300:
+                        raise RuntimeError(f"Originate failed ({call_resp.status_code}): {call_resp.text}")
+
+                    outbound = call_resp.json()
+                    outbound_id = outbound["id"]
+                    logger.info(f"Outbound channel: {outbound_id}")
+
+                db.table("calls").update({"status": "ringing"}).eq("id", call_id).execute()
+
+                # -- 5. Wait for StasisStart (= answered) --
+                logger.info("Waiting for answer (max 35s)...")
+                try:
+                    await asyncio.wait_for(call_answered.wait(), timeout=35)
+                except asyncio.TimeoutError:
+                    logger.info("Call timeout — no answer")
+
+                if call_failed_before_answer or not call_answered.is_set():
+                    logger.info(f"Call not answered: {dial_number}")
+                    async with httpx.AsyncClient(timeout=5) as http:
+                        await http.delete(f"{ari_url}/channels/{outbound_id}", auth=(ari_user, ari_pass))
+                        await http.delete(f"{ari_url}/channels/{ext_media_id}", auth=(ari_user, ari_pass))
+                    db.table("calls").update({
+                        "status": "no_answer",
+                        "ended_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", call_id).execute()
+                    return {"status": "no_answer", "call_id": call_id}
+
+                # -- 6. Call answered — bridge RTP to OpenAI --
+                db.table("calls").update({"status": "answered"}).eq("id", call_id).execute()
+                logger.info(f"Call answered! Starting AI bridge...")
+
+                system_prompt = get_system_prompt(
+                    agency_name=agency["name"],
+                    agency_phone=agency.get("phone", ""),
+                )
+                system_prompt = system_prompt.replace("{property_address}", tenant["property_address"])
+                system_prompt = system_prompt.replace("{amount_due}", str(tenant["amount_due"]))
+                system_prompt = system_prompt.replace("{due_date}", str(tenant["due_date"]))
+
+                # -- 7. Bidirectional RTP ↔ OpenAI Realtime --
+                result = await _bridge_rtp_to_openai(
+                    listen_port=listen_port,
+                    asterisk_rtp_addr=asterisk_rtp_addr,
+                    asterisk_rtp_port=asterisk_rtp_port,
+                    call_ended_event=call_ended,
+                    system_prompt=system_prompt,
+                    tools=get_tools_definition(),
+                    settings=settings,
                 )
 
-                if ext_media_resp.status_code != 200:
-                    error_msg = f"ARI ExternalMedia failed ({ext_media_resp.status_code}): {ext_media_resp.text}"
-                    logger.error(error_msg)
-                    _update_call_failed(db, call_id, error_msg)
-                    return {"status": "failed", "call_id": call_id}
-
-                ext_media = ext_media_resp.json()
-                ext_channel_id = ext_media["id"]
-                logger.info(f"ExternalMedia channel created: {ext_channel_id}")
-
-                call_resp = await http.post(
-                    f"{ari_url}/channels",
-                    auth=(ari_user, ari_pass),
-                    json={
-                        "endpoint": f"PJSIP/{dial_number}@didww-endpoint",
-                        "app": "outcallsai",
-                        "callerId": agency.get("caller_id") or settings.caller_id,
-                        "timeout": 30,
-                    },
-                )
-
-                if call_resp.status_code != 200:
-                    error_msg = f"ARI outbound call failed ({call_resp.status_code}): {call_resp.text}"
-                    logger.error(error_msg)
-                    await http.delete(f"{ari_url}/channels/{ext_channel_id}", auth=(ari_user, ari_pass))
-                    _update_call_failed(db, call_id, error_msg)
-                    return {"status": "failed", "call_id": call_id}
-
-                outbound_channel = call_resp.json()
-                outbound_channel_id = outbound_channel["id"]
-                logger.info(f"Outbound call initiated: {outbound_channel_id} -> {dial_number}")
-
-            db.table("calls").update({"status": "ringing"}).eq("id", call_id).execute()
-            logger.info(f"Call status: ringing. Waiting for answer (timeout=35s)...")
-
-            answered = await _wait_for_answer(
-                ari_ws, ari_url, ari_user, ari_pass,
-                outbound_channel_id, ext_channel_id,
-                timeout=35,
-            )
-
-            if not answered:
-                logger.info(f"Call not answered: {dial_number}")
+                # Cleanup channels
                 async with httpx.AsyncClient(timeout=5) as http:
-                    await http.delete(f"{ari_url}/channels/{outbound_channel_id}", auth=(ari_user, ari_pass))
-                    await http.delete(f"{ari_url}/channels/{ext_channel_id}", auth=(ari_user, ari_pass))
+                    await http.delete(f"{ari_url}/channels/{outbound_id}", auth=(ari_user, ari_pass))
+                    await http.delete(f"{ari_url}/channels/{ext_media_id}", auth=(ari_user, ari_pass))
+
                 db.table("calls").update({
-                    "status": "no_answer",
+                    "status": "completed",
                     "ended_at": datetime.now(timezone.utc).isoformat(),
+                    "duration_seconds": result.get("duration_seconds", 0),
+                    "transcript": result.get("transcript", ""),
+                    "summary": result.get("summary", ""),
+                    "ai_status_result": result.get("tenant_status", ""),
+                    "ai_notes": result.get("tenant_notes", ""),
                 }).eq("id", call_id).execute()
-                return {"status": "no_answer", "call_id": call_id}
 
-            db.table("calls").update({"status": "answered"}).eq("id", call_id).execute()
-            logger.info(f"Call answered: {dial_number}")
+                if result.get("tenant_status"):
+                    _update_tenant_from_call(
+                        db, tenant["id"],
+                        status=result["tenant_status"],
+                        notes=result.get("tenant_notes", ""),
+                    )
 
-            system_prompt = get_system_prompt(
-                agency_name=agency["name"],
-                agency_phone=agency.get("phone", ""),
-            )
-            system_prompt = system_prompt.replace("{property_address}", tenant["property_address"])
-            system_prompt = system_prompt.replace("{amount_due}", str(tenant["amount_due"]))
-            system_prompt = system_prompt.replace("{due_date}", str(tenant["due_date"]))
+                return {"status": "completed", "call_id": call_id, "result": result}
 
-            result = await _bridge_rtp_to_openai(
-                rtp_port=rtp_port,
-                system_prompt=system_prompt,
-                tools=get_tools_definition(),
-                settings=settings,
-            )
-
-            async with httpx.AsyncClient(timeout=5) as http:
-                await http.delete(f"{ari_url}/channels/{outbound_channel_id}", auth=(ari_user, ari_pass))
-                await http.delete(f"{ari_url}/channels/{ext_channel_id}", auth=(ari_user, ari_pass))
-
-        db.table("calls").update({
-            "status": "completed",
-            "ended_at": datetime.now(timezone.utc).isoformat(),
-            "duration_seconds": result.get("duration_seconds", 0),
-            "transcript": result.get("transcript", ""),
-            "summary": result.get("summary", ""),
-            "ai_status_result": result.get("tenant_status", ""),
-            "ai_notes": result.get("tenant_notes", ""),
-        }).eq("id", call_id).execute()
-
-        if result.get("tenant_status"):
-            _update_tenant_from_call(
-                db, tenant["id"],
-                status=result["tenant_status"],
-                notes=result.get("tenant_notes", ""),
-            )
-
-        return {"status": "completed", "call_id": call_id, "result": result}
+            finally:
+                event_task.cancel()
+                try:
+                    await event_task
+                except asyncio.CancelledError:
+                    pass
 
     except Exception as e:
-        logger.exception(f"Erreur appel locataire {tenant['id']}")
+        logger.exception(f"Call error for tenant {tenant['id']}: {e}")
         _update_call_failed(db, call_id, str(e)[:500])
         return {"status": "failed", "call_id": call_id, "error": str(e)}
 
 
-async def _wait_for_answer(
-    ari_ws,
-    ari_url: str, user: str, password: str,
-    outbound_id: str, ext_media_id: str,
-    timeout: int = 35,
-) -> bool:
-    """Écoute les événements ARI via le WebSocket déjà connecté."""
-    try:
-        end_time = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < end_time:
-            try:
-                remaining = end_time - asyncio.get_event_loop().time()
-                msg = await asyncio.wait_for(ari_ws.recv(), timeout=min(2, remaining))
-                event = json.loads(msg)
-                event_type = event.get("type", "")
-
-                logger.info(f"ARI event: {event_type} | channel={event.get('channel', {}).get('id', 'N/A')}")
-
-                if event_type == "StasisStart":
-                    channel_id = event.get("channel", {}).get("id", "")
-                    if channel_id == outbound_id:
-                        logger.info(f"StasisStart received for outbound channel, bridging...")
-                        async with httpx.AsyncClient(timeout=10) as http:
-                            bridge_resp = await http.post(
-                                f"{ari_url}/bridges",
-                                auth=(user, password),
-                                json={"type": "mixing"},
-                            )
-                            bridge = bridge_resp.json()
-                            await http.post(
-                                f"{ari_url}/bridges/{bridge['id']}/addChannel",
-                                auth=(user, password),
-                                json={"channel": f"{outbound_id},{ext_media_id}"},
-                            )
-                        return True
-
-                if event_type == "ChannelDestroyed":
-                    channel_id = event.get("channel", {}).get("id", "")
-                    if channel_id == outbound_id:
-                        logger.info(f"Outbound channel destroyed before answer")
-                        return False
-
-                if event_type == "ChannelStateChange":
-                    channel_id = event.get("channel", {}).get("id", "")
-                    state = event.get("channel", {}).get("state", "")
-                    logger.info(f"Channel {channel_id} state changed: {state}")
-
-            except asyncio.TimeoutError:
-                continue
-    except Exception as e:
-        logger.error(f"ARI event listener error: {e}")
-
-    return False
-
-
 async def _bridge_rtp_to_openai(
-    rtp_port: int,
+    listen_port: int,
+    asterisk_rtp_addr: str,
+    asterisk_rtp_port: int,
+    call_ended_event: asyncio.Event,
     system_prompt: str,
     tools: list[dict],
     settings,
 ) -> dict:
-    """Bridge bidirectionnel : RTP (Asterisk) ↔ OpenAI Realtime WebSocket."""
+    """
+    Bridge bidirectionnel RTP (Asterisk) ↔ OpenAI Realtime WebSocket.
+
+    - On REÇOIT l'audio d'Asterisk sur listen_port (UDP)
+    - On ENVOIE l'audio vers Asterisk sur asterisk_rtp_addr:asterisk_rtp_port
+    Source: thevysh/AsteriskOpenAIRealtimeAssistant realtime.py
+    """
     openai_url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview"
     headers = {
         "Authorization": f"Bearer {settings.openai_api_key}",
@@ -247,14 +322,24 @@ async def _bridge_rtp_to_openai(
     start_time = datetime.now(timezone.utc)
     call_active = True
 
+    # UDP socket to receive RTP from Asterisk and send back
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    rtp_sock.bind(("0.0.0.0", rtp_port))
-    rtp_sock.settimeout(0.5)
+    rtp_sock.bind(("0.0.0.0", listen_port))
+    rtp_sock.setblocking(False)
 
-    remote_rtp_addr = None
+    rtp_seq = 0
+    rtp_ts = 0
+    rtp_ssrc = 0xDEADBEEF
 
     try:
-        async with websockets.connect(openai_url, additional_headers=headers) as ws:
+        async with websockets.connect(
+            openai_url,
+            additional_headers=headers,
+            close_timeout=5,
+        ) as ws:
+            logger.info("OpenAI Realtime WebSocket connected")
+
+            # Configure session: ulaw 8kHz, server VAD
             await ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
@@ -274,78 +359,69 @@ async def _bridge_rtp_to_openai(
                 },
             }))
 
+            loop = asyncio.get_running_loop()
+
+            # -- Task 1: RTP from Asterisk → OpenAI --
             async def rtp_to_openai():
-                """Lit les paquets RTP du téléphone et les envoie à OpenAI."""
-                nonlocal remote_rtp_addr, call_active
-                loop = asyncio.get_event_loop()
-
-                while call_active:
+                nonlocal call_active
+                while call_active and not call_ended_event.is_set():
                     try:
-                        data, addr = await loop.run_in_executor(
-                            None, lambda: rtp_sock.recvfrom(4096)
-                        )
-                        remote_rtp_addr = addr
-
+                        data = await loop.sock_recv(rtp_sock, 4096)
                         if len(data) > 12:
+                            # Source: rtp.py parse_rtp → strip 12-byte header
                             audio_payload = data[12:]
-                            audio_b64 = base64.b64encode(audio_payload).decode("ascii")
                             await ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
-                                "audio": audio_b64,
+                                "audio": base64.b64encode(audio_payload).decode("ascii"),
                             }))
-                    except socket.timeout:
-                        continue
-                    except OSError:
-                        if call_active:
-                            continue
+                    except (asyncio.CancelledError, OSError):
                         break
                     except Exception as e:
                         if call_active:
-                            logger.error(f"RTP read error: {e}")
+                            logger.error(f"RTP→OpenAI error: {e}")
                         break
 
-            rtp_sequence = 0
-            rtp_timestamp = 0
-            rtp_ssrc = 12345678
-
+            # -- Task 2: OpenAI → RTP to Asterisk --
             async def openai_to_rtp():
-                """Reçoit l'audio d'OpenAI et l'envoie en RTP vers Asterisk."""
                 nonlocal tenant_status, tenant_notes, call_active
-                nonlocal rtp_sequence, rtp_timestamp
+                nonlocal rtp_seq, rtp_ts
 
                 async for message in ws:
-                    if not call_active:
+                    if not call_active or call_ended_event.is_set():
                         break
 
                     event = json.loads(message)
-                    event_type = event.get("type", "")
+                    evt_type = event.get("type", "")
 
-                    if event_type == "response.audio.delta":
-                        if remote_rtp_addr:
-                            audio_bytes = base64.b64decode(event["delta"])
-                            for i in range(0, len(audio_bytes), 160):
-                                chunk = audio_bytes[i:i + 160]
-                                rtp_header = struct.pack(
-                                    "!BBHII",
-                                    0x80,
-                                    0x00,
-                                    rtp_sequence & 0xFFFF,
-                                    rtp_timestamp & 0xFFFFFFFF,
-                                    rtp_ssrc,
-                                )
-                                rtp_sock.sendto(rtp_header + chunk, remote_rtp_addr)
-                                rtp_sequence += 1
-                                rtp_timestamp += 160
+                    if evt_type == "response.audio.delta":
+                        audio_bytes = base64.b64decode(event["delta"])
+                        # Source: rtp.py build_rtp → 12-byte header + payload
+                        for i in range(0, len(audio_bytes), RTP_SAMPLES_PER_FRAME):
+                            chunk = audio_bytes[i:i + RTP_SAMPLES_PER_FRAME]
+                            header = struct.pack(
+                                "!BBHII",
+                                0x80,                    # V=2, P=0, X=0, CC=0
+                                RTP_PAYLOAD_ULAW,        # PT=0 (PCMU)
+                                rtp_seq & 0xFFFF,
+                                rtp_ts & 0xFFFFFFFF,
+                                rtp_ssrc,
+                            )
+                            rtp_sock.sendto(
+                                header + chunk,
+                                (asterisk_rtp_addr, asterisk_rtp_port),
+                            )
+                            rtp_seq += 1
+                            rtp_ts += RTP_SAMPLES_PER_FRAME
 
-                    elif event_type == "response.audio_transcript.delta":
+                    elif evt_type == "response.audio_transcript.delta":
                         transcript_parts.append(event.get("delta", ""))
 
-                    elif event_type == "conversation.item.input_audio_transcription.completed":
+                    elif evt_type == "conversation.item.input_audio_transcription.completed":
                         user_text = event.get("transcript", "")
                         if user_text:
                             transcript_parts.append(f"\n[Locataire]: {user_text}\n")
 
-                    elif event_type == "response.function_call_arguments.done":
+                    elif evt_type == "response.function_call_arguments.done":
                         func_name = event.get("name", "")
                         try:
                             args = json.loads(event.get("arguments", "{}"))
@@ -355,38 +431,38 @@ async def _bridge_rtp_to_openai(
                         if func_name == "update_tenant_status":
                             tenant_status = args.get("status")
                             tenant_notes = args.get("notes", "")
-                            logger.info(f"Function call: status={tenant_status}, notes={tenant_notes}")
+                            logger.info(f"AI function: status={tenant_status}")
 
-                        call_output_id = event.get("call_id", "")
                         await ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {
                                 "type": "function_call_output",
-                                "call_id": call_output_id,
+                                "call_id": event.get("call_id", ""),
                                 "output": json.dumps({"success": True}),
                             },
                         }))
                         await ws.send(json.dumps({"type": "response.create"}))
 
-                    elif event_type == "error":
+                    elif evt_type == "error":
                         logger.error(f"OpenAI error: {event}")
                         call_active = False
                         break
 
             rtp_task = asyncio.create_task(rtp_to_openai())
             openai_task = asyncio.create_task(openai_to_rtp())
+            ended_task = asyncio.create_task(call_ended_event.wait())
 
             try:
-                await asyncio.wait_for(
-                    asyncio.gather(rtp_task, openai_task, return_exceptions=True),
+                done, pending = await asyncio.wait(
+                    [rtp_task, openai_task, ended_task],
                     timeout=300,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-            except asyncio.TimeoutError:
-                logger.info("Call timeout (5 min max)")
+                logger.info("Audio bridge ended")
             finally:
                 call_active = False
-                rtp_task.cancel()
-                openai_task.cancel()
+                for t in [rtp_task, openai_task, ended_task]:
+                    t.cancel()
 
     finally:
         rtp_sock.close()
@@ -423,7 +499,6 @@ def _update_tenant_from_call(db, tenant_id: str, status: str, notes: str):
 
 
 def _get_free_udp_port() -> int:
-    """Trouve un port UDP libre pour recevoir le RTP."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("", 0))
     port = sock.getsockname()[1]
