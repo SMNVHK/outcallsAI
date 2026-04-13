@@ -69,10 +69,28 @@ async def start_campaign_calls(campaign_id: str):
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for i, result in enumerate(results):
+                tenant_id = pending.data[i]["id"]
                 if isinstance(result, Exception):
-                    logger.error(f"Call failed for tenant {pending.data[i]['id']}: {result}")
+                    logger.error(f"Call failed for tenant {tenant_id}: {result}")
+                    db.table("tenants").update({
+                        "status": "call_dropped",
+                        "status_notes": f"Erreur: {str(result)[:200]}",
+                        "attempt_count": pending.data[i].get("attempt_count", 0) + 1,
+                        "last_called_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", tenant_id).execute()
+                elif isinstance(result, dict) and result.get("status") == "failed":
+                    logger.warning(f"Call failed for tenant {tenant_id}: {result.get('error', 'unknown')}")
+                    attempt = pending.data[i].get("attempt_count", 0) + 1
+                    max_attempts = campaign.get("max_attempts", 3)
+                    new_status = "call_dropped" if attempt >= max_attempts else "pending"
+                    db.table("tenants").update({
+                        "status": new_status,
+                        "status_notes": f"Échec appel: {result.get('error', '')[:200]}",
+                        "attempt_count": attempt,
+                        "last_called_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("id", tenant_id).execute()
 
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
 
     except Exception as e:
         logger.exception(f"Campaign runner error for {campaign_id}")

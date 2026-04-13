@@ -23,11 +23,11 @@ interface Campaign {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-zinc-700 text-zinc-300",
-  running: "bg-emerald-900 text-emerald-300",
-  paused: "bg-amber-900 text-amber-300",
-  completed: "bg-blue-900 text-blue-300",
-  cancelled: "bg-red-900 text-red-300",
+  draft: "bg-gray-100 text-gray-700",
+  running: "bg-emerald-100 text-emerald-700",
+  paused: "bg-amber-100 text-amber-700",
+  completed: "bg-blue-100 text-blue-700",
+  cancelled: "bg-red-100 text-red-700",
 };
 
 const STATUS_ICONS: Record<string, React.ReactNode> = {
@@ -85,7 +85,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Loader2 className="h-6 w-6 animate-spin text-zinc-500" />
+        <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
       </div>
     );
   }
@@ -95,7 +95,7 @@ export default function DashboardPage() {
       <div className="mb-8 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Campagnes de relance</h1>
-          <p className="mt-1 text-sm text-zinc-400">
+          <p className="mt-1 text-sm text-gray-500">
             Gérez vos campagnes d&apos;appels automatisés
           </p>
         </div>
@@ -111,10 +111,10 @@ export default function DashboardPage() {
       {showCreate && (
         <form
           onSubmit={handleCreate}
-          className="mb-6 flex items-end gap-3 rounded-xl border border-zinc-800 bg-zinc-900 p-4"
+          className="mb-6 flex items-end gap-3 rounded-xl border border-gray-200 bg-white p-4"
         >
           <div className="flex-1">
-            <label className="mb-1 block text-sm text-zinc-400">
+            <label className="mb-1 block text-sm text-gray-500">
               Nom de la campagne
             </label>
             <input
@@ -123,7 +123,7 @@ export default function DashboardPage() {
               onChange={(e) => setNewName(e.target.value)}
               autoFocus
               placeholder="Relances Avril 2026"
-              className="w-full rounded-lg border border-zinc-700 bg-zinc-800 px-3 py-2 text-sm outline-none focus:border-emerald-600"
+              className="w-full rounded-lg border border-gray-300 bg-gray-100 px-3 py-2 text-sm text-[#1e293b] outline-none focus:border-emerald-600"
             />
           </div>
           <button
@@ -136,7 +136,7 @@ export default function DashboardPage() {
           <button
             type="button"
             onClick={() => setShowCreate(false)}
-            className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-400 hover:text-white"
+            className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-500 hover:text-gray-900"
           >
             Annuler
           </button>
@@ -144,10 +144,10 @@ export default function DashboardPage() {
       )}
 
       {campaigns.length === 0 ? (
-        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-800 py-16 text-center">
-          <FolderOpen className="mb-3 h-10 w-10 text-zinc-600" />
-          <p className="text-zinc-400">Aucune campagne pour le moment</p>
-          <p className="mt-1 text-sm text-zinc-600">
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 py-16 text-center">
+          <FolderOpen className="mb-3 h-10 w-10 text-gray-400" />
+          <p className="text-gray-500">Aucune campagne pour le moment</p>
+          <p className="mt-1 text-sm text-gray-400">
             Créez votre première campagne pour commencer les relances
           </p>
         </div>
@@ -157,18 +157,18 @@ export default function DashboardPage() {
             <button
               key={c.id}
               onClick={() => router.push(`/dashboard/campaigns/${c.id}`)}
-              className="flex w-full items-center justify-between rounded-xl border border-zinc-800 bg-zinc-900/50 p-4 text-left transition hover:border-zinc-700 hover:bg-zinc-900"
+              className="flex w-full items-center justify-between rounded-xl border border-gray-200 bg-white p-4 text-left transition hover:border-gray-300 hover:bg-gray-50"
             >
               <div>
                 <h3 className="font-medium">{c.name}</h3>
-                <p className="mt-1 text-xs text-zinc-500">
+                <p className="mt-1 text-xs text-gray-400">
                   Créée le{" "}
                   {new Date(c.created_at).toLocaleDateString("fr-BE")}
                 </p>
               </div>
               <div className="flex items-center gap-3">
                 <span
-                  className={`flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_COLORS[c.status] || "bg-zinc-700"}`}
+                  className={`flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${STATUS_COLORS[c.status] || "bg-gray-100 text-gray-700"}`}
                 >
                   {STATUS_ICONS[c.status]}
                   {STATUS_LABELS[c.status] || c.status}
