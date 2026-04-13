@@ -8,6 +8,7 @@ services:
       - DIDWW_SIP_PASSWORD=${DIDWW_SIP_PASSWORD}
       - DIDWW_SIP_HOST=${DIDWW_SIP_HOST}
       - ASTERISK_ARI_PASSWORD=${ASTERISK_ARI_PASSWORD}
+      - OUTCALLS_CALLER_ID=${OUTCALLS_CALLER_ID}
     restart: unless-stopped
 
   backend:
