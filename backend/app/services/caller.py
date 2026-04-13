@@ -57,8 +57,9 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
         ari_ws_url = ari_url.replace("http://", "ws://").replace("https://", "wss://")
         ari_ws_url = f"{ari_ws_url}/events?api_key={ari_user}:{ari_pass}&app=outcallsai&subscribeAll=true"
 
+        logger.info(f"Connecting to ARI WebSocket: {ari_url}/events")
         async with websockets.connect(ari_ws_url) as ari_ws:
-            logger.info(f"ARI WebSocket connected, Stasis app 'outcallsai' registered")
+            logger.info("ARI WebSocket connected, Stasis app 'outcallsai' registered")
 
             await asyncio.sleep(0.5)
 
@@ -106,6 +107,7 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
                 logger.info(f"Outbound call initiated: {outbound_channel_id} -> {dial_number}")
 
             db.table("calls").update({"status": "ringing"}).eq("id", call_id).execute()
+            logger.info(f"Call status: ringing. Waiting for answer (timeout=35s)...")
 
             answered = await _wait_for_answer(
                 ari_ws, ari_url, ari_user, ari_pass,
@@ -187,7 +189,7 @@ async def _wait_for_answer(
                 event = json.loads(msg)
                 event_type = event.get("type", "")
 
-                logger.debug(f"ARI event: {event_type}")
+                logger.info(f"ARI event: {event_type} | channel={event.get('channel', {}).get('id', 'N/A')}")
 
                 if event_type == "StasisStart":
                     channel_id = event.get("channel", {}).get("id", "")
@@ -216,7 +218,7 @@ async def _wait_for_answer(
                 if event_type == "ChannelStateChange":
                     channel_id = event.get("channel", {}).get("id", "")
                     state = event.get("channel", {}).get("state", "")
-                    logger.debug(f"Channel {channel_id} state: {state}")
+                    logger.info(f"Channel {channel_id} state changed: {state}")
 
             except asyncio.TimeoutError:
                 continue
