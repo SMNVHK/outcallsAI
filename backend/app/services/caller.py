@@ -243,7 +243,7 @@ async def _bridge_rtp_to_openai(
     # Socket UDP pour recevoir/envoyer le RTP
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", rtp_port))
-    rtp_sock.setblocking(False)
+    rtp_sock.settimeout(0.5)
 
     remote_rtp_addr = None  # Sera rempli quand on reçoit le premier paquet RTP
 
@@ -276,22 +276,24 @@ async def _bridge_rtp_to_openai(
 
                 while call_active:
                     try:
-                        data, addr = await asyncio.wait_for(
-                            loop.run_in_executor(None, lambda: rtp_sock.recvfrom(4096)),
-                            timeout=1.0,
+                        data, addr = await loop.run_in_executor(
+                            None, lambda: rtp_sock.recvfrom(4096)
                         )
                         remote_rtp_addr = addr
 
                         if len(data) > 12:
-                            # Skip RTP header (12 bytes), le reste c'est l'audio ulaw
                             audio_payload = data[12:]
                             audio_b64 = base64.b64encode(audio_payload).decode("ascii")
                             await ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
                                 "audio": audio_b64,
                             }))
-                    except asyncio.TimeoutError:
+                    except socket.timeout:
                         continue
+                    except OSError:
+                        if call_active:
+                            continue
+                        break
                     except Exception as e:
                         if call_active:
                             logger.error(f"RTP read error: {e}")

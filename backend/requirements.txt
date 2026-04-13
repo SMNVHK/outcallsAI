@@ -9,4 +9,5 @@ websockets>=14.2
 httpx>=0.28.0
 python-jose[cryptography]>=3.4.0
 passlib[bcrypt]>=1.7.4
+bcrypt>=3.2.0,<4.1.0
 aiofiles>=24.1.0
