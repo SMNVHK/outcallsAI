@@ -123,7 +123,7 @@ async def start_campaign(campaign_id: str, agency_id: str = Depends(get_current_
     if not campaign.data:
         raise HTTPException(status_code=404, detail="Campagne introuvable")
 
-    if campaign.data[0]["status"] not in ("draft", "paused"):
+    if campaign.data[0]["status"] not in ("draft", "paused", "completed"):
         raise HTTPException(status_code=400, detail="La campagne ne peut pas être démarrée dans cet état")
 
     tenants = db.table("tenants").select("id").eq("campaign_id", campaign_id).eq("status", "pending").execute()

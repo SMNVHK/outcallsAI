@@ -1,6 +1,8 @@
 """
 Orchestrateur de campagne d'appels.
-Gère la file d'attente, le rate limiting, et les retries.
+UN appel à la fois, UN seul essai par tenant par lancement.
+Pas de retry automatique — les retries se font manuellement
+en relançant la campagne.
 """
 
 import asyncio
@@ -16,12 +18,8 @@ _active_campaigns: dict[str, bool] = {}
 
 
 async def start_campaign_calls(campaign_id: str):
-    """
-    Lance les appels pour une campagne.
-    Appelé en background via asyncio.create_task().
-    """
     if campaign_id in _active_campaigns:
-        logger.warning(f"Campaign {campaign_id} already running")
+        logger.warning(f"Campaign {campaign_id} already running, skipping")
         return
 
     _active_campaigns[campaign_id] = True
@@ -32,7 +30,6 @@ async def start_campaign_calls(campaign_id: str):
         if not campaign.data:
             logger.error(f"Campaign {campaign_id} not found")
             return
-
         campaign = campaign.data[0]
 
         agency = db.table("agencies").select("*").eq("id", campaign["agency_id"]).execute()
@@ -41,68 +38,77 @@ async def start_campaign_calls(campaign_id: str):
             return
         agency = agency.data[0]
 
-        max_concurrent = campaign.get("max_concurrent_calls", 5)
-        semaphore = asyncio.Semaphore(max_concurrent)
+        pending = db.table("tenants").select("*") \
+            .eq("campaign_id", campaign_id) \
+            .eq("status", "pending") \
+            .order("created_at") \
+            .execute()
 
-        while _active_campaigns.get(campaign_id):
+        if not pending.data:
+            logger.info(f"Campaign {campaign_id}: no pending tenants")
+            db.table("campaigns").update({"status": "completed"}).eq("id", campaign_id).execute()
+            return
+
+        total = len(pending.data)
+        logger.info(f"Campaign {campaign_id}: {total} tenants to call (one at a time)")
+
+        for idx, tenant in enumerate(pending.data):
+            if not _active_campaigns.get(campaign_id):
+                logger.info(f"Campaign {campaign_id} stopped by user")
+                break
+
             campaign_check = db.table("campaigns").select("status").eq("id", campaign_id).execute()
             if not campaign_check.data or campaign_check.data[0]["status"] != "running":
-                logger.info(f"Campaign {campaign_id} no longer running, stopping")
+                logger.info(f"Campaign {campaign_id} no longer running")
                 break
 
-            pending = db.table("tenants").select("*") \
-                .eq("campaign_id", campaign_id) \
-                .eq("status", "pending") \
-                .order("created_at") \
-                .limit(max_concurrent) \
-                .execute()
+            tenant_id = tenant["id"]
+            logger.info(f"[{idx+1}/{total}] Calling tenant {tenant['name']} ({tenant['phone']})...")
 
-            if not pending.data:
-                logger.info(f"Campaign {campaign_id}: no more pending tenants")
-                db.table("campaigns").update({"status": "completed"}).eq("id", campaign_id).execute()
-                break
+            # Mark as in-progress so it won't be picked up again
+            db.table("tenants").update({"status": "busy"}).eq("id", tenant_id).execute()
 
-            tasks = []
-            for tenant in pending.data:
-                tasks.append(_call_with_semaphore(semaphore, tenant, campaign, agency))
+            try:
+                result = await make_call(tenant, campaign, agency)
+            except Exception as e:
+                logger.error(f"Call exception for {tenant_id}: {e}")
+                result = {"status": "failed", "error": str(e)}
 
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+            status = result.get("status", "failed") if isinstance(result, dict) else "failed"
+            error = result.get("error", "") if isinstance(result, dict) else str(result)
 
-            for i, result in enumerate(results):
-                tenant_id = pending.data[i]["id"]
-                if isinstance(result, Exception):
-                    logger.error(f"Call failed for tenant {tenant_id}: {result}")
-                    db.table("tenants").update({
-                        "status": "call_dropped",
-                        "status_notes": f"Erreur: {str(result)[:200]}",
-                        "attempt_count": pending.data[i].get("attempt_count", 0) + 1,
-                        "last_called_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", tenant_id).execute()
-                elif isinstance(result, dict) and result.get("status") == "failed":
-                    logger.warning(f"Call failed for tenant {tenant_id}: {result.get('error', 'unknown')}")
-                    attempt = pending.data[i].get("attempt_count", 0) + 1
-                    max_attempts = campaign.get("max_attempts", 3)
-                    new_status = "call_dropped" if attempt >= max_attempts else "pending"
-                    db.table("tenants").update({
-                        "status": new_status,
-                        "status_notes": f"Échec appel: {result.get('error', '')[:200]}",
-                        "attempt_count": attempt,
-                        "last_called_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("id", tenant_id).execute()
+            if status == "failed":
+                logger.warning(f"Call failed for {tenant['name']}: {error[:100]}")
+                db.table("tenants").update({
+                    "status": "call_dropped",
+                    "status_notes": f"Échec: {error[:200]}",
+                    "attempt_count": tenant.get("attempt_count", 0) + 1,
+                    "last_called_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", tenant_id).execute()
+            elif status == "no_answer":
+                logger.info(f"No answer for {tenant['name']}")
+                db.table("tenants").update({
+                    "status": "no_answer",
+                    "attempt_count": tenant.get("attempt_count", 0) + 1,
+                    "last_called_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("id", tenant_id).execute()
+            else:
+                logger.info(f"Call completed for {tenant['name']}: {status}")
 
-            await asyncio.sleep(5)
+            # 10 seconds between calls to not spam
+            if idx < total - 1:
+                logger.info("Waiting 10s before next call...")
+                await asyncio.sleep(10)
+
+        db.table("campaigns").update({"status": "completed"}).eq("id", campaign_id).execute()
+        logger.info(f"Campaign {campaign_id} finished")
 
     except Exception as e:
-        logger.exception(f"Campaign runner error for {campaign_id}")
+        logger.exception(f"Campaign runner error: {e}")
         db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
 
     finally:
         _active_campaigns.pop(campaign_id, None)
-
-
-async def _call_with_semaphore(semaphore: asyncio.Semaphore, tenant: dict, campaign: dict, agency: dict):
-    async with semaphore:
-        return await make_call(tenant, campaign, agency)
 
 
 def stop_campaign(campaign_id: str):
