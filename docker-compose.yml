@@ -1,0 +1,32 @@
+services:
+  asterisk:
+    build: ./asterisk
+    container_name: outcallsai-asterisk
+    network_mode: host
+    environment:
+      - DIDWW_SIP_USERNAME=${DIDWW_SIP_USERNAME}
+      - DIDWW_SIP_PASSWORD=${DIDWW_SIP_PASSWORD}
+      - DIDWW_SIP_HOST=${DIDWW_SIP_HOST}
+      - ASTERISK_ARI_PASSWORD=${ASTERISK_ARI_PASSWORD}
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    container_name: outcallsai-backend
+    network_mode: host
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - asterisk
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    container_name: outcallsai-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000/api
+    depends_on:
+      - backend
+    restart: unless-stopped
