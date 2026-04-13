@@ -322,7 +322,6 @@ async def _bridge_rtp_to_openai(
     start_time = datetime.now(timezone.utc)
     call_active = True
 
-    # UDP socket to receive RTP from Asterisk and send back
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
     rtp_sock.setblocking(False)
@@ -330,6 +329,8 @@ async def _bridge_rtp_to_openai(
     rtp_seq = 0
     rtp_ts = 0
     rtp_ssrc = 0xDEADBEEF
+    rtp_send_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+    new_talkspurt = True
 
     try:
         async with websockets.connect(
@@ -339,7 +340,6 @@ async def _bridge_rtp_to_openai(
         ) as ws:
             logger.info("OpenAI Realtime WebSocket connected")
 
-            # Configure session: ulaw 8kHz, server VAD
             await ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
@@ -368,7 +368,6 @@ async def _bridge_rtp_to_openai(
                     try:
                         data = await loop.sock_recv(rtp_sock, 4096)
                         if len(data) > 12:
-                            # Source: rtp.py parse_rtp → strip 12-byte header
                             audio_payload = data[12:]
                             await ws.send(json.dumps({
                                 "type": "input_audio_buffer.append",
@@ -381,10 +380,52 @@ async def _bridge_rtp_to_openai(
                             logger.error(f"RTP→OpenAI error: {e}")
                         break
 
-            # -- Task 2: OpenAI → RTP to Asterisk --
+            # -- Task 2: Paced RTP sender (20ms between packets) --
+            async def rtp_sender():
+                nonlocal rtp_seq, rtp_ts, new_talkspurt, call_active
+                next_send = loop.time()
+                while call_active and not call_ended_event.is_set():
+                    try:
+                        chunk = await asyncio.wait_for(
+                            rtp_send_queue.get(), timeout=0.5
+                        )
+                    except asyncio.TimeoutError:
+                        continue
+                    except asyncio.CancelledError:
+                        break
+                    if chunk is None:
+                        break
+
+                    now = loop.time()
+                    delay = next_send - now
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+
+                    pt_byte = RTP_PAYLOAD_ULAW
+                    if new_talkspurt:
+                        pt_byte |= 0x80
+                        new_talkspurt = False
+
+                    header = struct.pack(
+                        "!BBHII",
+                        0x80,
+                        pt_byte,
+                        rtp_seq & 0xFFFF,
+                        rtp_ts & 0xFFFFFFFF,
+                        rtp_ssrc,
+                    )
+                    rtp_sock.sendto(
+                        header + chunk,
+                        (asterisk_rtp_addr, asterisk_rtp_port),
+                    )
+                    rtp_seq += 1
+                    rtp_ts += RTP_SAMPLES_PER_FRAME
+                    next_send = max(loop.time(), next_send + 0.020)
+
+            # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():
                 nonlocal tenant_status, tenant_notes, call_active
-                nonlocal rtp_seq, rtp_ts
+                nonlocal new_talkspurt
 
                 async for message in ws:
                     if not call_active or call_ended_event.is_set():
@@ -395,23 +436,12 @@ async def _bridge_rtp_to_openai(
 
                     if evt_type == "response.audio.delta":
                         audio_bytes = base64.b64decode(event["delta"])
-                        # Source: rtp.py build_rtp → 12-byte header + payload
                         for i in range(0, len(audio_bytes), RTP_SAMPLES_PER_FRAME):
                             chunk = audio_bytes[i:i + RTP_SAMPLES_PER_FRAME]
-                            header = struct.pack(
-                                "!BBHII",
-                                0x80,                    # V=2, P=0, X=0, CC=0
-                                RTP_PAYLOAD_ULAW,        # PT=0 (PCMU)
-                                rtp_seq & 0xFFFF,
-                                rtp_ts & 0xFFFFFFFF,
-                                rtp_ssrc,
-                            )
-                            rtp_sock.sendto(
-                                header + chunk,
-                                (asterisk_rtp_addr, asterisk_rtp_port),
-                            )
-                            rtp_seq += 1
-                            rtp_ts += RTP_SAMPLES_PER_FRAME
+                            await rtp_send_queue.put(chunk)
+
+                    elif evt_type == "response.audio.done":
+                        new_talkspurt = True
 
                     elif evt_type == "response.audio_transcript.delta":
                         transcript_parts.append(event.get("delta", ""))
@@ -449,19 +479,21 @@ async def _bridge_rtp_to_openai(
                         break
 
             rtp_task = asyncio.create_task(rtp_to_openai())
+            sender_task = asyncio.create_task(rtp_sender())
             openai_task = asyncio.create_task(openai_to_rtp())
             ended_task = asyncio.create_task(call_ended_event.wait())
 
             try:
                 done, pending = await asyncio.wait(
-                    [rtp_task, openai_task, ended_task],
+                    [rtp_task, sender_task, openai_task, ended_task],
                     timeout=300,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 logger.info("Audio bridge ended")
             finally:
                 call_active = False
-                for t in [rtp_task, openai_task, ended_task]:
+                await rtp_send_queue.put(None)
+                for t in [rtp_task, sender_task, openai_task, ended_task]:
                     t.cancel()
 
     finally:
