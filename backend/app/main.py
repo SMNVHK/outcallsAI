@@ -8,7 +8,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
-from app.routers import auth, campaigns, tenants
+from app.routers import auth, campaigns, tenants, messaging
 
 logging.basicConfig(
     level=logging.INFO,
@@ -47,6 +47,7 @@ app.add_middleware(
 app.include_router(auth.router, prefix="/api")
 app.include_router(campaigns.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
+app.include_router(messaging.router, prefix="/api")
 
 
 @app.get("/api/health")

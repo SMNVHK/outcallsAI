@@ -54,6 +54,21 @@ class AgencyLogin(BaseModel):
     password: str
 
 
+class AgencyProfileResponse(BaseModel):
+    id: str
+    name: str
+    email: str
+    phone: Optional[str] = None
+    caller_id: Optional[str] = None
+    created_at: str
+
+
+class AgencyProfileUpdate(BaseModel):
+    name: Optional[str] = None
+    phone: Optional[str] = None
+    caller_id: Optional[str] = None
+
+
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

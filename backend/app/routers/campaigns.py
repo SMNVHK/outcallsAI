@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Request
 from typing import Optional
+from datetime import datetime, timezone
 import csv
 import io
 
@@ -15,6 +16,66 @@ from app.routers.deps import get_current_agency_id
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 limiter = Limiter(key_func=get_remote_address)
+
+
+@router.get("/activity")
+async def get_recent_activity(agency_id: str = Depends(get_current_agency_id)):
+    """Timeline des appels récents pour l'agence (24 dernières heures)."""
+    db = get_supabase()
+
+    campaigns = db.table("campaigns").select("id").eq("agency_id", agency_id).execute()
+    if not campaigns.data:
+        return []
+
+    campaign_ids = [c["id"] for c in campaigns.data]
+
+    all_calls = []
+    for cid in campaign_ids:
+        calls = db.table("calls").select(
+            "id, tenant_id, campaign_id, status, duration_seconds, summary, ai_status_result, ai_notes, started_at, ended_at, error_message"
+        ).eq("campaign_id", cid).order("started_at", desc=True).limit(50).execute()
+        all_calls.extend(calls.data)
+
+    all_calls.sort(key=lambda c: c.get("started_at", ""), reverse=True)
+    all_calls = all_calls[:50]
+
+    tenant_ids = list({c["tenant_id"] for c in all_calls if c.get("tenant_id")})
+    tenants_map = {}
+    if tenant_ids:
+        for tid in tenant_ids:
+            t = db.table("tenants").select("id, name, phone, property_address, amount_due, status").eq("id", tid).execute()
+            if t.data:
+                tenants_map[tid] = t.data[0]
+
+    campaign_names = {}
+    for cid in campaign_ids:
+        camp = db.table("campaigns").select("id, name").eq("id", cid).execute()
+        if camp.data:
+            campaign_names[cid] = camp.data[0]["name"]
+
+    result = []
+    for call in all_calls:
+        tenant = tenants_map.get(call["tenant_id"], {})
+        result.append({
+            "call_id": call["id"],
+            "tenant_name": tenant.get("name", "Inconnu"),
+            "tenant_phone": tenant.get("phone", ""),
+            "property_address": tenant.get("property_address", ""),
+            "amount_due": tenant.get("amount_due", 0),
+            "campaign_name": campaign_names.get(call["campaign_id"], ""),
+            "campaign_id": call["campaign_id"],
+            "call_status": call["status"],
+            "ai_result": call.get("ai_status_result"),
+            "summary": call.get("summary"),
+            "ai_notes": call.get("ai_notes"),
+            "duration_seconds": call.get("duration_seconds"),
+            "started_at": call.get("started_at"),
+            "ended_at": call.get("ended_at"),
+            "error_message": call.get("error_message"),
+            "needs_attention": call.get("ai_status_result") in ("refuses", "escalated", "cant_pay"),
+        })
+
+    return result
 
 
 @router.post("", response_model=CampaignResponse)
@@ -38,7 +99,14 @@ async def create_campaign(data: CampaignCreate, agency_id: str = Depends(get_cur
 async def list_campaigns(agency_id: str = Depends(get_current_agency_id)):
     db = get_supabase()
     result = db.table("campaigns").select("*").eq("agency_id", agency_id).order("created_at", desc=True).execute()
-    return [_format_campaign(c) for c in result.data]
+    campaigns = []
+    for c in result.data:
+        tenants = db.table("tenants").select("status").eq("campaign_id", c["id"]).execute()
+        c["tenant_count"] = len(tenants.data)
+        c["pending_count"] = sum(1 for t in tenants.data if t["status"] == "pending")
+        c["completed_count"] = sum(1 for t in tenants.data if t["status"] not in ("pending", "busy"))
+        campaigns.append(_format_campaign(c))
+    return campaigns
 
 
 @router.get("/{campaign_id}", response_model=CampaignResponse)
@@ -165,6 +233,49 @@ async def start_campaign(request: Request, campaign_id: str, agency_id: str = De
     return {"message": f"Campagne démarrée avec {len(tenants.data)} locataires à appeler"}
 
 
+@router.post("/{campaign_id}/reset")
+async def reset_campaign(campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
+    db = get_supabase()
+    campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()
+    if not campaign.data:
+        raise HTTPException(status_code=404, detail="Campagne introuvable")
+
+    if campaign.data[0]["status"] == "running":
+        raise HTTPException(status_code=400, detail="Impossible de reset une campagne en cours. Mettez-la en pause d'abord.")
+
+    db.table("tenants").update({
+        "status": "pending",
+        "status_notes": None,
+        "promised_date": None,
+        "attempt_count": 0,
+        "last_called_at": None,
+        "next_retry_at": None,
+    }).eq("campaign_id", campaign_id).execute()
+
+    db.table("campaigns").update({"status": "draft"}).eq("id", campaign_id).execute()
+
+    count = db.table("tenants").select("id", count="exact").eq("campaign_id", campaign_id).execute()
+    return {"message": f"Campagne réinitialisée — {count.count} locataires remis en attente"}
+
+
+@router.delete("/{campaign_id}")
+async def delete_campaign(campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
+    db = get_supabase()
+    campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()
+    if not campaign.data:
+        raise HTTPException(status_code=404, detail="Campagne introuvable")
+
+    if campaign.data[0]["status"] == "running":
+        raise HTTPException(status_code=400, detail="Impossible de supprimer une campagne en cours")
+
+    tenants = db.table("tenants").select("id").eq("campaign_id", campaign_id).execute()
+    for t in tenants.data:
+        db.table("calls").delete().eq("tenant_id", t["id"]).execute()
+    db.table("tenants").delete().eq("campaign_id", campaign_id).execute()
+    db.table("campaigns").delete().eq("id", campaign_id).execute()
+    return {"message": "Campagne supprimée"}
+
+
 @router.post("/{campaign_id}/pause")
 async def pause_campaign(campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
     db = get_supabase()
@@ -174,6 +285,74 @@ async def pause_campaign(campaign_id: str, agency_id: str = Depends(get_current_
 
     db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
     return {"message": "Campagne mise en pause"}
+
+
+@router.get("/{campaign_id}/report")
+async def get_campaign_report(campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
+    """Rapport complet d'une campagne — preuve légale de chaque relance."""
+    db = get_supabase()
+
+    campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()
+    if not campaign.data:
+        raise HTTPException(status_code=404, detail="Campagne introuvable")
+
+    agency = db.table("agencies").select("name, email, phone").eq("id", agency_id).execute()
+    agency_info = agency.data[0] if agency.data else {}
+
+    tenants = db.table("tenants").select("*").eq("campaign_id", campaign_id).order("name").execute()
+
+    report_tenants = []
+    for t in tenants.data:
+        calls = db.table("calls").select("*").eq("tenant_id", t["id"]).order("started_at").execute()
+        messages = db.table("tenant_messages").select("*").eq("tenant_id", t["id"]).order("created_at").execute()
+
+        report_tenants.append({
+            "name": t["name"],
+            "phone": t["phone"],
+            "property_address": t["property_address"],
+            "amount_due": t["amount_due"],
+            "due_date": str(t["due_date"]),
+            "current_status": t["status"],
+            "status_notes": t.get("status_notes"),
+            "promised_date": str(t["promised_date"]) if t.get("promised_date") else None,
+            "attempt_count": t.get("attempt_count", 0),
+            "calls": [
+                {
+                    "date": str(c["started_at"]),
+                    "end_date": str(c["ended_at"]) if c.get("ended_at") else None,
+                    "status": c["status"],
+                    "duration_seconds": c.get("duration_seconds"),
+                    "ai_result": c.get("ai_status_result"),
+                    "summary": c.get("summary"),
+                    "ai_notes": c.get("ai_notes"),
+                    "transcript": c.get("transcript"),
+                    "error": c.get("error_message"),
+                }
+                for c in calls.data
+            ],
+            "messages": [
+                {
+                    "date": str(m["created_at"]),
+                    "channel": m["channel"],
+                    "content": m["content"],
+                    "status": m["status"],
+                }
+                for m in messages.data
+            ] if messages.data else [],
+        })
+
+    c = campaign.data[0]
+    return {
+        "campaign": {
+            "name": c["name"],
+            "status": c["status"],
+            "created_at": str(c["created_at"]),
+        },
+        "agency": agency_info,
+        "generated_at": datetime.now(timezone.utc).isoformat() if True else "",
+        "tenant_count": len(report_tenants),
+        "tenants": report_tenants,
+    }
 
 
 def _format_campaign(c: dict) -> CampaignResponse:

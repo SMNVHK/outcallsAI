@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
+import re
 
-from app.models import TenantResponse, CallResponse
+from app.models import TenantResponse, TenantCreate, CallResponse
 from app.database import get_supabase
 from app.routers.deps import get_current_agency_id
 
@@ -17,6 +18,45 @@ async def list_tenants(campaign_id: str, agency_id: str = Depends(get_current_ag
 
     result = db.table("tenants").select("*").eq("campaign_id", campaign_id).order("created_at").execute()
     return [_format(t) for t in result.data]
+
+
+@router.post("/campaign/{campaign_id}", response_model=TenantResponse)
+async def add_tenant(campaign_id: str, data: TenantCreate, agency_id: str = Depends(get_current_agency_id)):
+    db = get_supabase()
+
+    campaign = db.table("campaigns").select("id").eq("id", campaign_id).eq("agency_id", agency_id).execute()
+    if not campaign.data:
+        raise HTTPException(status_code=404, detail="Campagne introuvable")
+
+    phone = data.phone.strip().replace(" ", "")
+    if not re.match(r"^\+?\d{8,15}$", phone):
+        raise HTTPException(status_code=400, detail="Numéro de téléphone invalide")
+
+    if data.amount_due <= 0 or data.amount_due > 100_000:
+        raise HTTPException(status_code=400, detail="Montant invalide (0-100 000€)")
+
+    result = db.table("tenants").insert({
+        "campaign_id": campaign_id,
+        "name": data.name.strip(),
+        "phone": phone,
+        "property_address": data.property_address.strip(),
+        "amount_due": data.amount_due,
+        "due_date": str(data.due_date),
+    }).execute()
+
+    return _format(result.data[0])
+
+
+@router.delete("/{tenant_id}")
+async def delete_tenant(tenant_id: str, agency_id: str = Depends(get_current_agency_id)):
+    db = get_supabase()
+    tenant = db.table("tenants").select("id, campaigns!inner(agency_id)").eq("id", tenant_id).execute()
+    if not tenant.data or tenant.data[0]["campaigns"]["agency_id"] != agency_id:
+        raise HTTPException(status_code=404, detail="Locataire introuvable")
+
+    db.table("calls").delete().eq("tenant_id", tenant_id).execute()
+    db.table("tenants").delete().eq("id", tenant_id).execute()
+    return {"message": "Locataire supprimé"}
 
 
 @router.get("/{tenant_id}", response_model=TenantResponse)

@@ -61,6 +61,14 @@ export async function getCampaigns() {
   return fetchAPI("/campaigns");
 }
 
+export async function getRecentActivity() {
+  return fetchAPI("/campaigns/activity");
+}
+
+export async function getCampaignReport(id: string) {
+  return fetchAPI(`/campaigns/${id}/report`);
+}
+
 export async function getCampaign(id: string) {
   return fetchAPI(`/campaigns/${id}`);
 }
@@ -99,10 +107,90 @@ export async function pauseCampaign(id: string) {
   return fetchAPI(`/campaigns/${id}/pause`, { method: "POST" });
 }
 
+export async function resetCampaign(id: string) {
+  return fetchAPI(`/campaigns/${id}/reset`, { method: "POST" });
+}
+
+export async function deleteCampaign(id: string) {
+  return fetchAPI(`/campaigns/${id}`, { method: "DELETE" });
+}
+
 export async function getTenants(campaignId: string) {
   return fetchAPI(`/tenants/campaign/${campaignId}`);
 }
 
+export async function addTenant(
+  campaignId: string,
+  data: {
+    name: string;
+    phone: string;
+    property_address: string;
+    amount_due: number;
+    due_date: string;
+  },
+) {
+  return fetchAPI(`/tenants/campaign/${campaignId}`, {
+    method: "POST",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function deleteTenant(tenantId: string) {
+  return fetchAPI(`/tenants/${tenantId}`, { method: "DELETE" });
+}
+
 export async function getTenantCalls(tenantId: string) {
   return fetchAPI(`/tenants/${tenantId}/calls`);
+}
+
+// ─── Messaging ─────────────────────────────────────────────────
+
+export async function sendSMS(tenantId: string, message: string) {
+  return fetchAPI("/messaging/sms/send", {
+    method: "POST",
+    body: JSON.stringify({ tenant_id: tenantId, message }),
+  });
+}
+
+export async function sendBulkSMS(
+  campaignId: string,
+  message: string,
+  statusFilter?: string,
+) {
+  return fetchAPI("/messaging/sms/bulk", {
+    method: "POST",
+    body: JSON.stringify({
+      campaign_id: campaignId,
+      message,
+      status_filter: statusFilter || null,
+    }),
+  });
+}
+
+export async function sendEmail(tenantId: string, tenantEmail?: string) {
+  return fetchAPI("/messaging/email/send", {
+    method: "POST",
+    body: JSON.stringify({ tenant_id: tenantId, tenant_email: tenantEmail }),
+  });
+}
+
+export async function getMessageHistory(tenantId: string) {
+  return fetchAPI(`/messaging/history/${tenantId}`);
+}
+
+// ─── Profile ───────────────────────────────────────────────────
+
+export async function getProfile() {
+  return fetchAPI("/auth/profile");
+}
+
+export async function updateProfile(data: {
+  name?: string;
+  phone?: string;
+  caller_id?: string;
+}) {
+  return fetchAPI("/auth/profile", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
 }

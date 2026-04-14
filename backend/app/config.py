@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     daily_call_limit: int = 50
     monthly_call_limit: int = 500
 
+    # DIDWW SMS
+    didww_sms_username: str = ""
+    didww_sms_password: str = ""
+    didww_sms_source: str = ""
+    didww_sms_endpoint: str = "https://eu.sms-out.didww.com/outbound_messages"
+
+    # Email (SMTP)
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_from_name: str = "OutcallsAI"
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 

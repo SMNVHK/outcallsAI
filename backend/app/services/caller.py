@@ -278,6 +278,7 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
                         db, tenant["id"],
                         status=result["tenant_status"],
                         notes=result.get("tenant_notes", ""),
+                        promised_date=result.get("promised_date"),
                     )
 
                 return {"status": "completed", "call_id": call_id, "result": result}
@@ -455,7 +456,13 @@ async def _bridge_rtp_to_openai(
                         if func_name == "update_tenant_status":
                             tenant_status = args.get("status")
                             tenant_notes = args.get("notes", "")
-                            logger.info(f"AI function: status={tenant_status}")
+                            attitude = args.get("tenant_attitude", "")
+                            promised = args.get("promised_date", "")
+                            if attitude:
+                                tenant_notes = f"[Attitude: {attitude}] {tenant_notes}"
+                            if promised:
+                                tenant_notes = f"{tenant_notes} [Date promise: {promised}]"
+                            logger.info(f"AI function: status={tenant_status} attitude={attitude} promised={promised}")
 
                         await ws.send(json.dumps({
                             "type": "conversation.item.create",
@@ -494,11 +501,20 @@ async def _bridge_rtp_to_openai(
         rtp_sock.close()
 
     duration = (datetime.now(timezone.utc) - start_time).seconds
+
+    promised = None
+    if "[Date promise:" in tenant_notes:
+        import re
+        m = re.search(r"\[Date promise: (\d{4}-\d{2}-\d{2})\]", tenant_notes)
+        if m:
+            promised = m.group(1)
+
     return {
         "transcript": "".join(transcript_parts),
         "summary": tenant_notes,
         "tenant_status": tenant_status,
         "tenant_notes": tenant_notes,
+        "promised_date": promised,
         "duration_seconds": duration,
     }
 
@@ -511,13 +527,15 @@ def _update_call_failed(db, call_id: str, error_msg: str):
     }).eq("id", call_id).execute()
 
 
-def _update_tenant_from_call(db, tenant_id: str, status: str, notes: str):
+def _update_tenant_from_call(db, tenant_id: str, status: str, notes: str, promised_date: str | None = None):
     update_data = {
         "status": status,
         "status_notes": notes,
         "last_called_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if promised_date:
+        update_data["promised_date"] = promised_date
     tenant = db.table("tenants").select("attempt_count").eq("id", tenant_id).execute()
     if tenant.data:
         update_data["attempt_count"] = tenant.data[0].get("attempt_count", 0) + 1
