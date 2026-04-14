@@ -338,6 +338,11 @@ async def _bridge_rtp_to_openai(
     playout_lock = asyncio.Lock()
     playout_started = False
     need_marker = True
+    current_response_id = None
+    current_output_item_id = None
+    current_output_content_index = 0
+    played_item_id = None
+    played_audio_ms = 0
 
     try:
         async with websockets.connect(
@@ -390,6 +395,7 @@ async def _bridge_rtp_to_openai(
             # -- Task 2: RTP sender with fixed 20ms cadence --
             async def rtp_sender():
                 nonlocal rtp_seq, rtp_ts, call_active, playout_started, need_marker
+                nonlocal played_item_id, played_audio_ms
                 next_send_at = loop.time()
 
                 while call_active and not call_ended_event.is_set():
@@ -441,11 +447,16 @@ async def _bridge_rtp_to_openai(
                     )
                     rtp_seq += 1
                     rtp_ts += RTP_SAMPLES_PER_FRAME
+                    if is_audio_frame and current_output_item_id:
+                        played_item_id = current_output_item_id
+                        played_audio_ms += int(RTP_FRAME_DURATION_SEC * 1000)
                     next_send_at += RTP_FRAME_DURATION_SEC
 
             # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():
                 nonlocal tenant_status, tenant_notes, call_active
+                nonlocal current_response_id, current_output_item_id, current_output_content_index
+                nonlocal played_item_id, played_audio_ms, playout_started, need_marker
 
                 async for message in ws:
                     if not call_active or call_ended_event.is_set():
@@ -456,16 +467,50 @@ async def _bridge_rtp_to_openai(
 
                     if evt_type in ("response.audio.delta", "response.output_audio.delta"):
                         audio_bytes = base64.b64decode(event["delta"])
+                        item_id = event.get("item_id")
+                        if item_id and item_id != current_output_item_id:
+                            current_output_item_id = item_id
+                            current_output_content_index = event.get("content_index", 0)
+                            played_audio_ms = 0
+                            played_item_id = item_id
+                        current_response_id = event.get("response_id", current_response_id)
                         async with playout_lock:
                             playout_buffer.extend(audio_bytes)
 
-                    elif evt_type == "response.audio_transcript.delta":
+                    elif evt_type in ("response.audio_transcript.delta", "response.output_audio_transcript.delta"):
                         transcript_parts.append(event.get("delta", ""))
 
                     elif evt_type == "conversation.item.input_audio_transcription.completed":
                         user_text = event.get("transcript", "")
                         if user_text:
                             transcript_parts.append(f"\n[Locataire]: {user_text}\n")
+
+                    elif evt_type == "input_audio_buffer.speech_started":
+                        logger.info("Barge-in detected: tenant speech started, clearing local playback")
+
+                        async with playout_lock:
+                            playout_buffer.clear()
+                            playout_started = False
+                            need_marker = True
+
+                        if played_item_id and played_audio_ms > 0:
+                            await ws.send(json.dumps({
+                                "type": "conversation.item.truncate",
+                                "item_id": played_item_id,
+                                "content_index": current_output_content_index,
+                                "audio_end_ms": played_audio_ms,
+                            }))
+                            logger.info(
+                                f"Truncated assistant audio at {played_audio_ms}ms for item {played_item_id}"
+                            )
+                            played_audio_ms = 0
+                            current_output_item_id = None
+                            current_output_content_index = 0
+
+                    elif evt_type == "response.done":
+                        current_response_id = None
+                        current_output_item_id = None
+                        current_output_content_index = 0
 
                     elif evt_type == "response.function_call_arguments.done":
                         func_name = event.get("name", "")
