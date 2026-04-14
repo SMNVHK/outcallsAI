@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 # RTP constants for ulaw (G.711 μ-law)
 RTP_PAYLOAD_ULAW = 0
 RTP_SAMPLES_PER_FRAME = 160  # 8000 Hz * 20ms
+RTP_FRAME_DURATION_SEC = 0.02
+RTP_PLAYOUT_PREBUFFER_FRAMES = 3  # 60ms avoids chopped words without sounding slow
+ULAW_SILENCE_BYTE = 0xFF
 
 
 async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
@@ -331,8 +334,10 @@ async def _bridge_rtp_to_openai(
     rtp_seq = 0
     rtp_ts = 0
     rtp_ssrc = 0xDEADBEEF
-    rtp_send_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-    new_talkspurt = True
+    playout_buffer = bytearray()
+    playout_lock = asyncio.Lock()
+    playout_started = False
+    need_marker = True
 
     try:
         async with websockets.connect(
@@ -382,25 +387,45 @@ async def _bridge_rtp_to_openai(
                             logger.error(f"RTP→OpenAI error: {e}")
                         break
 
-            # -- Task 2: RTP sender (burst, Asterisk jitter buffer handles timing) --
+            # -- Task 2: RTP sender with fixed 20ms cadence --
             async def rtp_sender():
-                nonlocal rtp_seq, rtp_ts, new_talkspurt, call_active
+                nonlocal rtp_seq, rtp_ts, call_active, playout_started, need_marker
+                next_send_at = loop.time()
+
                 while call_active and not call_ended_event.is_set():
                     try:
-                        chunk = await asyncio.wait_for(
-                            rtp_send_queue.get(), timeout=0.5
-                        )
-                    except asyncio.TimeoutError:
-                        continue
+                        now = loop.time()
+                        sleep_for = next_send_at - now
+                        if sleep_for > 0:
+                            await asyncio.sleep(sleep_for)
+                        elif sleep_for < -0.1:
+                            # If the event loop stalls, resync instead of bursting packets.
+                            next_send_at = now
                     except asyncio.CancelledError:
                         break
-                    if chunk is None:
-                        break
+
+                    async with playout_lock:
+                        if not playout_started and len(playout_buffer) >= (
+                            RTP_PLAYOUT_PREBUFFER_FRAMES * RTP_SAMPLES_PER_FRAME
+                        ):
+                            playout_started = True
+
+                        if playout_started and len(playout_buffer) >= RTP_SAMPLES_PER_FRAME:
+                            chunk = bytes(playout_buffer[:RTP_SAMPLES_PER_FRAME])
+                            del playout_buffer[:RTP_SAMPLES_PER_FRAME]
+                            is_audio_frame = True
+                        else:
+                            chunk = bytes([ULAW_SILENCE_BYTE]) * RTP_SAMPLES_PER_FRAME
+                            if len(playout_buffer) == 0:
+                                playout_started = False
+                            is_audio_frame = False
 
                     pt_byte = RTP_PAYLOAD_ULAW
-                    if new_talkspurt:
+                    if is_audio_frame and need_marker:
                         pt_byte |= 0x80
-                        new_talkspurt = False
+                        need_marker = False
+                    elif not is_audio_frame:
+                        need_marker = True
 
                     header = struct.pack(
                         "!BBHII",
@@ -416,11 +441,11 @@ async def _bridge_rtp_to_openai(
                     )
                     rtp_seq += 1
                     rtp_ts += RTP_SAMPLES_PER_FRAME
+                    next_send_at += RTP_FRAME_DURATION_SEC
 
             # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():
                 nonlocal tenant_status, tenant_notes, call_active
-                nonlocal new_talkspurt
 
                 async for message in ws:
                     if not call_active or call_ended_event.is_set():
@@ -429,14 +454,10 @@ async def _bridge_rtp_to_openai(
                     event = json.loads(message)
                     evt_type = event.get("type", "")
 
-                    if evt_type == "response.audio.delta":
+                    if evt_type in ("response.audio.delta", "response.output_audio.delta"):
                         audio_bytes = base64.b64decode(event["delta"])
-                        for i in range(0, len(audio_bytes), RTP_SAMPLES_PER_FRAME):
-                            chunk = audio_bytes[i:i + RTP_SAMPLES_PER_FRAME]
-                            await rtp_send_queue.put(chunk)
-
-                    elif evt_type == "response.audio.done":
-                        new_talkspurt = True
+                        async with playout_lock:
+                            playout_buffer.extend(audio_bytes)
 
                     elif evt_type == "response.audio_transcript.delta":
                         transcript_parts.append(event.get("delta", ""))
@@ -493,7 +514,6 @@ async def _bridge_rtp_to_openai(
                 logger.info("Audio bridge ended")
             finally:
                 call_active = False
-                await rtp_send_queue.put(None)
                 for t in [rtp_task, sender_task, openai_task, ended_task]:
                     t.cancel()
 
