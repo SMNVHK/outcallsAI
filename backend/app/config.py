@@ -1,5 +1,9 @@
+import logging
+
 from pydantic_settings import BaseSettings
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -21,9 +25,20 @@ class Settings(BaseSettings):
 
     max_concurrent_calls: int = 5
 
+    frontend_url: str = "http://localhost:3000"
+
+    daily_call_limit: int = 50
+    monthly_call_limit: int = 500
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    settings = Settings()
+    if settings.jwt_secret == "change-me":
+        raise RuntimeError(
+            "FATAL: JWT_SECRET is still 'change-me'. "
+            "Set a strong random secret in .env before running in production."
+        )
+    return settings

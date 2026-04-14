@@ -31,6 +31,11 @@ async def get_tenant(tenant_id: str, agency_id: str = Depends(get_current_agency
 @router.get("/{tenant_id}/calls", response_model=list[CallResponse])
 async def get_tenant_calls(tenant_id: str, agency_id: str = Depends(get_current_agency_id)):
     db = get_supabase()
+
+    tenant_check = db.table("tenants").select("id, campaigns!inner(agency_id)").eq("id", tenant_id).execute()
+    if not tenant_check.data or tenant_check.data[0]["campaigns"]["agency_id"] != agency_id:
+        raise HTTPException(status_code=404, detail="Locataire introuvable")
+
     result = db.table("calls").select("*").eq("tenant_id", tenant_id).order("started_at", desc=True).execute()
     return [
         CallResponse(

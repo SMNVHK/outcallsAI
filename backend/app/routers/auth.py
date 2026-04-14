@@ -1,7 +1,9 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 from passlib.context import CryptContext
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.models import AgencyRegister, AgencyLogin, TokenResponse
 from app.database import get_supabase
@@ -9,6 +11,7 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+limiter = Limiter(key_func=get_remote_address)
 
 
 def create_token(agency_id: str, agency_name: str) -> str:
@@ -31,7 +34,8 @@ def verify_token(token: str) -> dict:
 
 
 @router.post("/register", response_model=TokenResponse)
-async def register(data: AgencyRegister):
+@limiter.limit("3/hour")
+async def register(request: Request, data: AgencyRegister):
     db = get_supabase()
 
     existing = db.table("agencies").select("id").eq("email", data.email).execute()
@@ -58,7 +62,8 @@ async def register(data: AgencyRegister):
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(data: AgencyLogin):
+@limiter.limit("5/minute")
+async def login(request: Request, data: AgencyLogin):
     db = get_supabase()
 
     result = db.table("agencies").select("*").eq("email", data.email).execute()

@@ -195,7 +195,8 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
 
                     # -- 4. Originate outbound call --
                     # Doc: POST /channels?endpoint=...&app=...&callerId=...
-                    logger.info(f"Originating call to {dial_number} via DIDWW...")
+                    masked = dial_number[:4] + "***" + dial_number[-2:] if len(dial_number) > 6 else "***"
+                    logger.info(f"Originating call to {masked} via DIDWW...")
                     call_resp = await http.post(
                         f"{ari_url}/channels",
                         auth=(ari_user, ari_pass),
@@ -380,10 +381,9 @@ async def _bridge_rtp_to_openai(
                             logger.error(f"RTP→OpenAI error: {e}")
                         break
 
-            # -- Task 2: Paced RTP sender (20ms between packets) --
+            # -- Task 2: RTP sender (burst, Asterisk jitter buffer handles timing) --
             async def rtp_sender():
                 nonlocal rtp_seq, rtp_ts, new_talkspurt, call_active
-                next_send = loop.time()
                 while call_active and not call_ended_event.is_set():
                     try:
                         chunk = await asyncio.wait_for(
@@ -395,11 +395,6 @@ async def _bridge_rtp_to_openai(
                         break
                     if chunk is None:
                         break
-
-                    now = loop.time()
-                    delay = next_send - now
-                    if delay > 0:
-                        await asyncio.sleep(delay)
 
                     pt_byte = RTP_PAYLOAD_ULAW
                     if new_talkspurt:
@@ -420,7 +415,6 @@ async def _bridge_rtp_to_openai(
                     )
                     rtp_seq += 1
                     rtp_ts += RTP_SAMPLES_PER_FRAME
-                    next_send = max(loop.time(), next_send + 0.020)
 
             # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():

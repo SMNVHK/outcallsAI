@@ -1,7 +1,10 @@
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Request
 from typing import Optional
 import csv
 import io
+
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.models import (
     CampaignCreate, CampaignResponse, CampaignStatus,
@@ -11,6 +14,7 @@ from app.database import get_supabase
 from app.routers.deps import get_current_agency_id
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
+limiter = Limiter(key_func=get_remote_address)
 
 
 @router.post("", response_model=CampaignResponse)
@@ -54,6 +58,10 @@ async def get_campaign(campaign_id: str, agency_id: str = Depends(get_current_ag
     return _format_campaign(campaign)
 
 
+MAX_CSV_SIZE = 1 * 1024 * 1024  # 1 MB
+MAX_CSV_ROWS = 500
+
+
 @router.post("/{campaign_id}/upload-csv", response_model=list[TenantResponse])
 async def upload_csv(
     campaign_id: str,
@@ -67,6 +75,9 @@ async def upload_csv(
         raise HTTPException(status_code=404, detail="Campagne introuvable")
 
     content = await file.read()
+    if len(content) > MAX_CSV_SIZE:
+        raise HTTPException(status_code=400, detail=f"Fichier trop volumineux (max {MAX_CSV_SIZE // 1024}KB)")
+
     text = content.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text), delimiter=";")
 
@@ -85,13 +96,27 @@ async def upload_csv(
     tenants_to_insert = []
     errors = []
     for i, row in enumerate(reader, start=2):
+        if i - 1 > MAX_CSV_ROWS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Trop de lignes (max {MAX_CSV_ROWS}). Découpez votre fichier.",
+            )
         try:
             cleaned = {k.strip().lower(): v.strip() for k, v in row.items() if k}
+
+            phone = cleaned["phone"].strip().replace(" ", "")
+            if not phone.replace("+", "").isdigit() or len(phone) < 8:
+                raise ValueError(f"Numéro invalide: {phone}")
+
+            amount = float(cleaned["amount_due"].replace(",", "."))
+            if amount <= 0 or amount > 100_000:
+                raise ValueError(f"Montant invalide: {amount}")
+
             tenant = TenantCSVRow(
                 name=cleaned["name"],
-                phone=cleaned["phone"],
+                phone=phone,
                 property_address=cleaned["property_address"],
-                amount_due=float(cleaned["amount_due"].replace(",", ".")),
+                amount_due=amount,
                 due_date=cleaned["due_date"],
             )
             tenants_to_insert.append({
@@ -116,7 +141,8 @@ async def upload_csv(
 
 
 @router.post("/{campaign_id}/start")
-async def start_campaign(campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
+@limiter.limit("2/minute")
+async def start_campaign(request: Request, campaign_id: str, agency_id: str = Depends(get_current_agency_id)):
     db = get_supabase()
 
     campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()

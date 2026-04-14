@@ -1,4 +1,19 @@
 services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: outcallsai-caddy
+    network_mode: host
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      - SITE_ADDRESS=${SITE_ADDRESS:-localhost}
+    depends_on:
+      - frontend
+      - backend
+    restart: unless-stopped
+
   asterisk:
     build: ./asterisk
     container_name: outcallsai-asterisk
@@ -28,3 +43,7 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

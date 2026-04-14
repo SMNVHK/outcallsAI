@@ -7,14 +7,75 @@ en relançant la campagne.
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone
 
+from app.config import get_settings
 from app.database import get_supabase
 from app.services.caller import make_call
 
 logger = logging.getLogger(__name__)
 
 _active_campaigns: dict[str, bool] = {}
+
+BELGIUM_UTC_OFFSET = 2  # CEST (summer), 1 in winter — simplified
+DAY_MAP = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+
+def _mask_phone(phone: str) -> str:
+    """Mask phone number for logging: +324920***60"""
+    if len(phone) <= 6:
+        return "***"
+    return phone[:6] + "***" + phone[-2:]
+
+
+def _check_call_window(campaign: dict) -> bool:
+    """Return True if current time in Belgium is within the campaign's call window."""
+    now_utc = datetime.now(timezone.utc)
+    belgium_hour = (now_utc.hour + BELGIUM_UTC_OFFSET) % 24
+
+    start_str = campaign.get("call_window_start", "09:00:00")
+    end_str = campaign.get("call_window_end", "18:00:00")
+    start_h = int(str(start_str).split(":")[0])
+    end_h = int(str(end_str).split(":")[0])
+
+    if belgium_hour < start_h or belgium_hour >= end_h:
+        return False
+
+    call_days = campaign.get("call_days", ["mon", "tue", "wed", "thu", "fri"])
+    belgium_weekday = (now_utc.weekday() + (1 if (now_utc.hour + BELGIUM_UTC_OFFSET) >= 24 else 0)) % 7
+    allowed_weekdays = [DAY_MAP.get(d, -1) for d in call_days]
+    return belgium_weekday in allowed_weekdays
+
+
+def _check_daily_limit(db, agency_id: str) -> bool:
+    """Return True if the agency hasn't exceeded its daily call limit."""
+    settings = get_settings()
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    result = db.table("calls").select("id", count="exact") \
+        .gte("started_at", today_start.isoformat()) \
+        .execute()
+
+    today_count = len(result.data) if result.data else 0
+    if today_count >= settings.daily_call_limit:
+        logger.warning(f"Agency {agency_id}: daily limit reached ({today_count}/{settings.daily_call_limit})")
+        return False
+    return True
+
+
+def _check_monthly_limit(db, agency_id: str) -> bool:
+    """Return True if the agency hasn't exceeded its monthly call limit."""
+    settings = get_settings()
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    result = db.table("calls").select("id", count="exact") \
+        .gte("started_at", month_start.isoformat()) \
+        .execute()
+
+    month_count = len(result.data) if result.data else 0
+    if month_count >= settings.monthly_call_limit:
+        logger.warning(f"Agency {agency_id}: monthly limit reached ({month_count}/{settings.monthly_call_limit})")
+        return False
+    return True
 
 
 async def start_campaign_calls(campaign_id: str):
@@ -37,6 +98,20 @@ async def start_campaign_calls(campaign_id: str):
             logger.error(f"Agency {campaign['agency_id']} not found")
             return
         agency = agency.data[0]
+        agency_id = agency["id"]
+
+        if not _check_call_window(campaign):
+            logger.info(f"Campaign {campaign_id}: outside call window, pausing")
+            db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
+            return
+
+        if not _check_daily_limit(db, agency_id):
+            db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
+            return
+
+        if not _check_monthly_limit(db, agency_id):
+            db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
+            return
 
         pending = db.table("tenants").select("*") \
             .eq("campaign_id", campaign_id) \
@@ -62,10 +137,18 @@ async def start_campaign_calls(campaign_id: str):
                 logger.info(f"Campaign {campaign_id} no longer running")
                 break
 
-            tenant_id = tenant["id"]
-            logger.info(f"[{idx+1}/{total}] Calling tenant {tenant['name']} ({tenant['phone']})...")
+            if not _check_call_window(campaign):
+                logger.info(f"Campaign {campaign_id}: call window ended, pausing")
+                db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
+                break
 
-            # Mark as in-progress so it won't be picked up again
+            if not _check_daily_limit(db, agency_id):
+                db.table("campaigns").update({"status": "paused"}).eq("id", campaign_id).execute()
+                break
+
+            tenant_id = tenant["id"]
+            logger.info(f"[{idx+1}/{total}] Calling tenant {tenant['name']} ({_mask_phone(tenant['phone'])})...")
+
             db.table("tenants").update({"status": "busy"}).eq("id", tenant_id).execute()
 
             try:
@@ -95,7 +178,6 @@ async def start_campaign_calls(campaign_id: str):
             else:
                 logger.info(f"Call completed for {tenant['name']}: {status}")
 
-            # 10 seconds between calls to not spam
             if idx < total - 1:
                 logger.info("Waiting 10s before next call...")
                 await asyncio.sleep(10)
