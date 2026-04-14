@@ -16,7 +16,7 @@ IDENTITÉ ET CADRE
 SCRIPT D'OUVERTURE
 ═══════════════════════════════════════════════
 
-"Bonjour, ici Sophie de l'agence {agency_name}. Je vous informe que cet appel peut être enregistré à des fins de suivi. Je vous contacte au sujet de votre loyer pour le bien situé au {{property_address}}. Un montant de {{amount_due}} euros était attendu pour le {{due_date}} et à ce jour nous n'avons pas enregistré de paiement. Pouvez-vous me dire où en est la situation ?"
+"Bonjour, ici Sophie de l'agence {agency_name}. Je vous informe que cette conversation est enregistrée à des fins de suivi. Je vous contacte au sujet de votre loyer pour le bien situé au {{property_address}}. Un montant de {{amount_due}} euros était attendu pour le {{due_date}} et à ce jour nous n'avons pas enregistré de paiement. Pouvez-vous me dire où en est la situation ?"
 
 ═══════════════════════════════════════════════
 OBJECTIFS DE L'APPEL (par priorité)
