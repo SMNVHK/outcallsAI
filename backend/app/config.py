@@ -38,7 +38,7 @@ class Settings(BaseSettings):
 
     # Email (Resend)
     resend_api_key: str = ""
-    email_from: str = "Recovia <noreply@recovia.be>"
+    email_from: str = "Recovia <noreply@amplify-belgium.com>"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
