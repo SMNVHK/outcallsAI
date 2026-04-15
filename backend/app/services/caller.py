@@ -326,6 +326,10 @@ async def _bridge_rtp_to_openai(
     tenant_notes = ""
     start_time = datetime.now(timezone.utc)
     call_active = True
+    human_speech_detected = False
+
+    MAX_CALL_DURATION = 300
+    INITIAL_SILENCE_TIMEOUT = 15
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
@@ -486,6 +490,7 @@ async def _bridge_rtp_to_openai(
                             transcript_parts.append(f"\n[Locataire]: {user_text}\n")
 
                     elif evt_type == "input_audio_buffer.speech_started":
+                        human_speech_detected = True
                         logger.info("Barge-in detected: tenant speech started, clearing local playback")
 
                         async with playout_lock:
@@ -530,6 +535,22 @@ async def _bridge_rtp_to_openai(
                                 tenant_notes = f"{tenant_notes} [Date promise: {promised}]"
                             logger.info(f"AI function: status={tenant_status} attitude={attitude} promised={promised}")
 
+                        elif func_name == "end_call":
+                            reason = args.get("reason", "conversation_ended")
+                            logger.info(f"AI requested end_call: reason={reason}")
+                            await ws.send(json.dumps({
+                                "type": "conversation.item.create",
+                                "item": {
+                                    "type": "function_call_output",
+                                    "call_id": event.get("call_id", ""),
+                                    "output": json.dumps({"success": True, "action": "hanging_up"}),
+                                },
+                            }))
+                            await asyncio.sleep(1.5)
+                            call_active = False
+                            call_ended_event.set()
+                            break
+
                         await ws.send(json.dumps({
                             "type": "conversation.item.create",
                             "item": {
@@ -545,21 +566,33 @@ async def _bridge_rtp_to_openai(
                         call_active = False
                         break
 
+            async def silence_watchdog():
+                """Detect voicemail/silence: if no human speech after INITIAL_SILENCE_TIMEOUT, end call."""
+                await asyncio.sleep(INITIAL_SILENCE_TIMEOUT)
+                if not human_speech_detected and call_active:
+                    logger.warning(f"No human speech detected after {INITIAL_SILENCE_TIMEOUT}s — likely voicemail or no answer")
+                    nonlocal tenant_status, tenant_notes
+                    if not tenant_status:
+                        tenant_status = "voicemail"
+                        tenant_notes = f"Aucune voix humaine détectée après {INITIAL_SILENCE_TIMEOUT}s. Probable messagerie vocale ou silence."
+                    call_ended_event.set()
+
             rtp_task = asyncio.create_task(rtp_to_openai())
             sender_task = asyncio.create_task(rtp_sender())
             openai_task = asyncio.create_task(openai_to_rtp())
             ended_task = asyncio.create_task(call_ended_event.wait())
+            watchdog_task = asyncio.create_task(silence_watchdog())
 
             try:
                 done, pending = await asyncio.wait(
-                    [rtp_task, sender_task, openai_task, ended_task],
-                    timeout=300,
+                    [rtp_task, sender_task, openai_task, ended_task, watchdog_task],
+                    timeout=MAX_CALL_DURATION,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
                 logger.info("Audio bridge ended")
             finally:
                 call_active = False
-                for t in [rtp_task, sender_task, openai_task, ended_task]:
+                for t in [rtp_task, sender_task, openai_task, ended_task, watchdog_task]:
                     t.cancel()
 
     finally:

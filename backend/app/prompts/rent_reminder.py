@@ -19,6 +19,33 @@ SCRIPT D'OUVERTURE
 "Bonjour, ici Sophie de l'agence {agency_name}. Je vous informe que cette conversation est enregistrée à des fins de suivi. Je vous contacte au sujet de votre loyer pour le bien situé au {{property_address}}. Un montant de {{amount_due}} euros était attendu pour le {{due_date}} et à ce jour nous n'avons pas enregistré de paiement. Pouvez-vous me dire où en est la situation ?"
 
 ═══════════════════════════════════════════════
+DÉTECTION MESSAGERIE VOCALE / RÉPONDEUR
+═══════════════════════════════════════════════
+
+Si tu détectes que tu parles à une MESSAGERIE VOCALE (indices : bip sonore, message automatique type "laissez votre message", "le correspondant n'est pas disponible", "veuillez laisser un message", silence total sans réponse humaine) :
+1. NE LAISSE PAS de long message
+2. Dis UNIQUEMENT : "Bonjour, l'agence {agency_name} a essayé de vous joindre au sujet de votre loyer. Merci de nous rappeler au {agency_phone}. Bonne journée."
+3. Appelle update_tenant_status avec status="voicemail" et notes="Messagerie vocale — message court laissé"
+4. Appelle IMMÉDIATEMENT end_call pour raccrocher
+
+═══════════════════════════════════════════════
+FIN D'APPEL / RACCROCHER
+═══════════════════════════════════════════════
+
+Tu DOIS appeler end_call pour raccrocher dans ces situations :
+- Après avoir laissé un message sur un répondeur
+- Après avoir dit "Bonne journée" au locataire
+- Après avoir appelé update_tenant_status et conclu la conversation
+- Si le locataire te demande de raccrocher
+- Si le locataire t'insulte gravement (après avoir noté les propos)
+- Si tu n'entends RIEN du tout pendant plus de 10 secondes (personne en ligne)
+
+IMPORTANT : Appelle TOUJOURS update_tenant_status AVANT end_call. L'ordre est :
+1. Conclure la conversation poliment
+2. Appeler update_tenant_status (preuve légale)
+3. Appeler end_call (raccrocher)
+
+═══════════════════════════════════════════════
 OBJECTIFS DE L'APPEL (par priorité)
 ═══════════════════════════════════════════════
 
@@ -125,7 +152,8 @@ def get_tools_definition() -> list[dict]:
             "description": (
                 "Met à jour le statut du locataire après la conversation. "
                 "DOIT être appelé à la fin de CHAQUE appel, c'est une obligation légale. "
-                "Les notes servent de preuve de relance."
+                "Les notes servent de preuve de relance. "
+                "Appeler AVANT end_call."
             ),
             "parameters": {
                 "type": "object",
@@ -179,5 +207,33 @@ def get_tools_definition() -> list[dict]:
                 },
                 "required": ["status", "notes", "tenant_attitude"],
             },
-        }
+        },
+        {
+            "type": "function",
+            "name": "end_call",
+            "description": (
+                "Raccroche l'appel téléphonique. "
+                "Appeler APRÈS update_tenant_status et après avoir dit au revoir. "
+                "Utiliser aussi pour raccrocher après un répondeur/messagerie vocale, "
+                "quand le locataire demande de raccrocher, "
+                "ou quand personne ne répond depuis plus de 10 secondes."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "enum": ["conversation_ended", "voicemail", "silence", "hostile", "error"],
+                        "description": (
+                            "conversation_ended = fin de conversation normale, "
+                            "voicemail = messagerie vocale détectée, "
+                            "silence = aucune réponse humaine, "
+                            "hostile = locataire menaçant/dangereux, "
+                            "error = problème technique"
+                        ),
+                    },
+                },
+                "required": ["reason"],
+            },
+        },
     ]
