@@ -327,9 +327,11 @@ async def _bridge_rtp_to_openai(
     start_time = datetime.now(timezone.utc)
     call_active = True
     human_speech_detected = False
+    hanging_up = False
 
     MAX_CALL_DURATION = 300
     INITIAL_SILENCE_TIMEOUT = 15
+    HANGUP_GRACE_PERIOD = 5
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
@@ -383,6 +385,8 @@ async def _bridge_rtp_to_openai(
                 while call_active and not call_ended_event.is_set():
                     try:
                         data = await loop.sock_recv(rtp_sock, 4096)
+                        if hanging_up:
+                            continue
                         if len(data) > 12:
                             audio_payload = data[12:]
                             await ws.send(json.dumps({
@@ -491,6 +495,9 @@ async def _bridge_rtp_to_openai(
 
                     elif evt_type == "input_audio_buffer.speech_started":
                         human_speech_detected = True
+                        if hanging_up:
+                            logger.info("Speech detected during hangup — ignoring (call ending)")
+                            continue
                         logger.info("Barge-in detected: tenant speech started, clearing local playback")
 
                         async with playout_lock:
@@ -538,6 +545,7 @@ async def _bridge_rtp_to_openai(
                         elif func_name == "end_call":
                             reason = args.get("reason", "conversation_ended")
                             logger.info(f"AI requested end_call: reason={reason}")
+                            hanging_up = True
                             await ws.send(json.dumps({
                                 "type": "conversation.item.create",
                                 "item": {
@@ -546,7 +554,9 @@ async def _bridge_rtp_to_openai(
                                     "output": json.dumps({"success": True, "action": "hanging_up"}),
                                 },
                             }))
-                            await asyncio.sleep(1.5)
+                            logger.info(f"Hanging up in {HANGUP_GRACE_PERIOD}s (letting goodbye audio finish)...")
+                            await asyncio.sleep(HANGUP_GRACE_PERIOD)
+                            logger.info("Grace period over — disconnecting")
                             call_active = False
                             call_ended_event.set()
                             break
