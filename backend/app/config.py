@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     caller_id: str = ""
 
     asterisk_ari_url: str = "http://localhost:8088/ari"
-    asterisk_ari_user: str = "outcallsai"
+    asterisk_ari_user: str = "recovia"
     asterisk_ari_password: str = ""
 
     jwt_secret: str = "change-me"
@@ -36,13 +36,9 @@ class Settings(BaseSettings):
     didww_sms_source: str = ""
     didww_sms_endpoint: str = "https://eu.sms-out.didww.com/outbound_messages"
 
-    # Email (SMTP)
-    smtp_host: str = ""
-    smtp_port: int = 587
-    smtp_user: str = ""
-    smtp_password: str = ""
-    smtp_from_email: str = ""
-    smtp_from_name: str = "OutcallsAI"
+    # Email (Resend)
+    resend_api_key: str = ""
+    email_from: str = "Recovia <noreply@recovia.be>"
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

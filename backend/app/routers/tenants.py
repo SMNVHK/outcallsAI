@@ -35,14 +35,18 @@ async def add_tenant(campaign_id: str, data: TenantCreate, agency_id: str = Depe
     if data.amount_due <= 0 or data.amount_due > 100_000:
         raise HTTPException(status_code=400, detail="Montant invalide (0-100 000€)")
 
-    result = db.table("tenants").insert({
+    insert_data = {
         "campaign_id": campaign_id,
         "name": data.name.strip(),
         "phone": phone,
         "property_address": data.property_address.strip(),
         "amount_due": data.amount_due,
         "due_date": str(data.due_date),
-    }).execute()
+    }
+    if data.email:
+        insert_data["email"] = data.email.strip()
+
+    result = db.table("tenants").insert(insert_data).execute()
 
     return _format(result.data[0])
 
@@ -102,6 +106,7 @@ def _format(t: dict) -> TenantResponse:
         campaign_id=t["campaign_id"],
         name=t["name"],
         phone=t["phone"],
+        email=t.get("email"),
         property_address=t["property_address"],
         amount_due=t["amount_due"],
         due_date=str(t["due_date"]),

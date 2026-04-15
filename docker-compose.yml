@@ -1,7 +1,7 @@
 services:
   caddy:
     image: caddy:2-alpine
-    container_name: outcallsai-caddy
+    container_name: recovia-caddy
     network_mode: host
     volumes:
       - ./caddy/Caddyfile:/etc/caddy/Caddyfile
@@ -16,7 +16,7 @@ services:
 
   asterisk:
     build: ./asterisk
-    container_name: outcallsai-asterisk
+    container_name: recovia-asterisk
     network_mode: host
     environment:
       - DIDWW_SIP_USERNAME=${DIDWW_SIP_USERNAME}
@@ -28,7 +28,7 @@ services:
 
   backend:
     build: ./backend
-    container_name: outcallsai-backend
+    container_name: recovia-backend
     network_mode: host
     env_file:
       - ./backend/.env
@@ -38,7 +38,7 @@ services:
 
   frontend:
     build: ./frontend
-    container_name: outcallsai-frontend
+    container_name: recovia-frontend
     network_mode: host
     depends_on:
       - backend

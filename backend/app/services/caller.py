@@ -127,7 +127,7 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
         ari_ws_url = (
             f"ws://localhost:8088/ari/events"
             f"?api_key={ari_user}:{ari_pass}"
-            f"&app=outcallsai"
+            f"&app=recovia"
             f"&subscribeAll=true"
         )
         logger.info("Connecting to ARI WebSocket...")
@@ -161,7 +161,7 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
                         f"{ari_url}/channels/externalMedia",
                         auth=(ari_user, ari_pass),
                         params={
-                            "app": "outcallsai",
+                            "app": "recovia",
                             "external_host": f"127.0.0.1:{listen_port}",
                             "format": "ulaw",
                         },
@@ -205,7 +205,7 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
                         auth=(ari_user, ari_pass),
                         params={
                             "endpoint": f"PJSIP/{dial_number}@didww-endpoint",
-                            "app": "outcallsai",
+                            "app": "recovia",
                             "appArgs": "dialed",
                             "callerId": caller_id,
                             "timeout": 30,

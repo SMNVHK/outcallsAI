@@ -19,6 +19,7 @@ import {
   XCircle,
   Clock,
   ArrowRight,
+  Zap,
 } from "lucide-react";
 
 interface Campaign {
@@ -48,11 +49,12 @@ interface ActivityItem {
 }
 
 const STATUS_CONFIG: Record<string, { bg: string; dot: string; label: string; icon: React.ReactNode }> = {
-  draft:     { bg: "bg-gray-100 text-gray-600",     dot: "bg-gray-400",    label: "Brouillon", icon: <FolderOpen className="h-3.5 w-3.5" /> },
-  running:   { bg: "bg-emerald-50 text-emerald-700", dot: "bg-emerald-500", label: "En cours",  icon: <Play className="h-3.5 w-3.5" /> },
-  paused:    { bg: "bg-amber-50 text-amber-700",     dot: "bg-amber-500",   label: "En pause",  icon: <Pause className="h-3.5 w-3.5" /> },
-  completed: { bg: "bg-blue-50 text-blue-700",       dot: "bg-blue-500",    label: "Terminée",  icon: <CheckCircle className="h-3.5 w-3.5" /> },
-  cancelled: { bg: "bg-red-50 text-red-600",         dot: "bg-red-500",     label: "Annulée",   icon: <FolderOpen className="h-3.5 w-3.5" /> },
+  draft:     { bg: "bg-gray-100 text-gray-600",      dot: "bg-gray-400",    label: "Brouillon",  icon: <FolderOpen className="h-3.5 w-3.5" /> },
+  scheduled: { bg: "bg-purple-50 text-purple-700",   dot: "bg-purple-500",  label: "Planifiée",  icon: <Clock className="h-3.5 w-3.5" /> },
+  running:   { bg: "bg-emerald-50 text-emerald-700", dot: "bg-emerald-500", label: "En cours",   icon: <Play className="h-3.5 w-3.5" /> },
+  paused:    { bg: "bg-amber-50 text-amber-700",     dot: "bg-amber-500",   label: "En pause",   icon: <Pause className="h-3.5 w-3.5" /> },
+  completed: { bg: "bg-blue-50 text-blue-700",       dot: "bg-blue-500",    label: "Terminée",   icon: <CheckCircle className="h-3.5 w-3.5" /> },
+  cancelled: { bg: "bg-red-50 text-red-600",         dot: "bg-red-500",     label: "Annulée",    icon: <FolderOpen className="h-3.5 w-3.5" /> },
 };
 
 const AI_RESULT_CONFIG: Record<string, { icon: React.ReactNode; color: string; label: string }> = {
@@ -73,10 +75,26 @@ export default function DashboardPage() {
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
   const [activityFilter, setActivityFilter] = useState<"all" | "attention">("all");
+  const [agencyName, setAgencyName] = useState("");
+
+  useEffect(() => {
+    const name = localStorage.getItem("agency_name");
+    if (name) setAgencyName(name);
+  }, []);
 
   useEffect(() => {
     Promise.all([loadCampaigns(), loadActivity()]).finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    const hasRunning = campaigns.some((c) => c.status === "running");
+    if (!hasRunning) return;
+    const interval = setInterval(() => {
+      loadCampaigns();
+      loadActivity();
+    }, 8000);
+    return () => clearInterval(interval);
+  }, [campaigns]);
 
   async function loadCampaigns() {
     try { const data = await getCampaigns(); setCampaigns(data); } catch { /* handled */ }
@@ -118,7 +136,9 @@ export default function DashboardPage() {
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Tableau de bord</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            {agencyName ? `Bonjour, ${agencyName}` : "Tableau de bord"}
+          </h1>
           <p className="mt-1 text-sm text-gray-500">Vue d&apos;ensemble de vos campagnes de relance</p>
         </div>
         <button onClick={() => setShowCreate(true)}
@@ -126,6 +146,27 @@ export default function DashboardPage() {
           <Plus className="h-4 w-4" /> Nouvelle campagne
         </button>
       </div>
+
+      {/* Live banner */}
+      {activeCampaigns > 0 && (
+        <div className="mb-6 flex items-center gap-3 rounded-2xl border border-emerald-200 bg-gradient-to-r from-emerald-50 to-white p-4">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-100">
+            <Zap className="h-5 w-5 text-emerald-600" />
+          </div>
+          <div className="flex-1">
+            <p className="text-sm font-semibold text-emerald-800">
+              {activeCampaigns} campagne{activeCampaigns > 1 ? "s" : ""} en cours
+            </p>
+            <p className="text-xs text-emerald-600">
+              Rafraîchissement auto toutes les 8s &middot; {totalCompleted} appels traités
+            </p>
+          </div>
+          <span className="relative flex h-3 w-3">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+            <span className="relative inline-flex h-3 w-3 rounded-full bg-emerald-500" />
+          </span>
+        </div>
+      )}
 
       {/* KPI cards */}
       <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-4">

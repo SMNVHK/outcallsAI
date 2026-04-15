@@ -22,6 +22,7 @@ class TenantStatus(str, Enum):
 
 class CampaignStatus(str, Enum):
     draft = "draft"
+    scheduled = "scheduled"
     running = "running"
     paused = "paused"
     completed = "completed"
@@ -85,6 +86,7 @@ class CampaignCreate(BaseModel):
     call_days: list[str] = Field(default=["mon", "tue", "wed", "thu", "fri"])
     max_concurrent_calls: int = Field(default=5, ge=1, le=20)
     max_attempts: int = Field(default=3, ge=1, le=10)
+    scheduled_at: Optional[datetime] = None
 
 
 class CampaignResponse(BaseModel):
@@ -97,6 +99,7 @@ class CampaignResponse(BaseModel):
     call_days: list[str]
     max_concurrent_calls: int
     max_attempts: int
+    scheduled_at: Optional[str] = None
     created_at: str
     tenant_count: Optional[int] = None
     pending_count: Optional[int] = None
@@ -108,6 +111,7 @@ class CampaignResponse(BaseModel):
 class TenantCreate(BaseModel):
     name: str
     phone: str
+    email: Optional[str] = None
     property_address: str
     amount_due: float
     due_date: date
@@ -118,6 +122,7 @@ class TenantResponse(BaseModel):
     campaign_id: str
     name: str
     phone: str
+    email: Optional[str] = None
     property_address: str
     amount_due: float
     due_date: str
@@ -132,6 +137,7 @@ class TenantResponse(BaseModel):
 class TenantCSVRow(BaseModel):
     name: str
     phone: str
+    email: Optional[str] = None
     property_address: str
     amount_due: float
     due_date: str

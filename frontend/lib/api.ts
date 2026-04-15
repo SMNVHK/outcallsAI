@@ -111,6 +111,13 @@ export async function resetCampaign(id: string) {
   return fetchAPI(`/campaigns/${id}/reset`, { method: "POST" });
 }
 
+export async function scheduleCampaign(id: string, scheduledAt: string) {
+  return fetchAPI(`/campaigns/${id}/schedule`, {
+    method: "POST",
+    body: JSON.stringify({ scheduled_at: scheduledAt }),
+  });
+}
+
 export async function deleteCampaign(id: string) {
   return fetchAPI(`/campaigns/${id}`, { method: "DELETE" });
 }
@@ -124,6 +131,7 @@ export async function addTenant(
   data: {
     name: string;
     phone: string;
+    email?: string;
     property_address: string;
     amount_due: number;
     due_date: string;
@@ -141,6 +149,28 @@ export async function deleteTenant(tenantId: string) {
 
 export async function getTenantCalls(tenantId: string) {
   return fetchAPI(`/tenants/${tenantId}/calls`);
+}
+
+export async function getCampaignStats(id: string) {
+  return fetchAPI(`/campaigns/${id}/stats`);
+}
+
+export async function exportCampaignCSV(id: string) {
+  const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
+  const res = await fetch(`${API_BASE}/campaigns/${id}/export-csv`, {
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  });
+  if (!res.ok) throw new Error("Erreur export CSV");
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  const disposition = res.headers.get("content-disposition");
+  a.download = disposition?.match(/filename="(.+)"/)?.[1] || `Recovia_export.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ─── Messaging ─────────────────────────────────────────────────

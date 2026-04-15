@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
 import { Phone, LogOut, LayoutDashboard, Settings, Menu, X, Shield } from "lucide-react";
+import { ToastProvider } from "@/components/toast";
 
 const NAV_ITEMS = [
   {
@@ -61,7 +62,7 @@ export default function DashboardLayout({
         <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-600">
           <Phone className="h-4 w-4 text-white" />
         </div>
-        <span className="font-semibold text-[#1e293b]">OutcallsAI</span>
+        <span className="font-semibold text-[#1e293b]">Recovia</span>
       </div>
 
       <nav className="flex-1 space-y-1 px-2 py-4">
@@ -125,7 +126,7 @@ export default function DashboardLayout({
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-600">
             <Phone className="h-3.5 w-3.5 text-white" />
           </div>
-          <span className="font-semibold text-sm">OutcallsAI</span>
+          <span className="font-semibold text-sm">Recovia</span>
         </div>
       </div>
 
@@ -152,7 +153,9 @@ export default function DashboardLayout({
 
       {/* Main content */}
       <main className="flex-1 overflow-auto bg-[#f8fafc] text-[#1e293b] lg:ml-0">
-        <div className="pt-14 lg:pt-0">{children}</div>
+        <div className="pt-14 lg:pt-0">
+          <ToastProvider>{children}</ToastProvider>
+        </div>
       </main>
     </div>
   );

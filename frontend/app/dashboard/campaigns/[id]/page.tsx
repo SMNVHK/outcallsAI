@@ -2,6 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { useToast } from "@/components/toast";
 import {
   getCampaign,
   getTenants,
@@ -16,6 +17,9 @@ import {
   sendSMS,
   sendBulkSMS,
   getMessageHistory,
+  exportCampaignCSV,
+  getCampaignStats,
+  scheduleCampaign,
 } from "@/lib/api";
 import {
   ArrowLeft,
@@ -56,6 +60,7 @@ interface Tenant {
   id: string;
   name: string;
   phone: string;
+  email: string | null;
   property_address: string;
   amount_due: number;
   due_date: string;
@@ -83,6 +88,7 @@ interface Campaign {
   id: string;
   name: string;
   status: string;
+  scheduled_at: string | null;
   tenant_count: number;
   pending_count: number;
   completed_count: number;
@@ -129,6 +135,7 @@ const FILTER_OPTIONS = [
 export default function CampaignDetailPage() {
   const params = useParams();
   const router = useRouter();
+  const toast = useToast();
   const id = params.id as string;
 
   const [campaign, setCampaign] = useState<Campaign | null>(null);
@@ -144,7 +151,7 @@ export default function CampaignDetailPage() {
 
   // Add tenant form
   const [showAddForm, setShowAddForm] = useState(false);
-  const [addForm, setAddForm] = useState({ name: "", phone: "", property_address: "", amount_due: "", due_date: "" });
+  const [addForm, setAddForm] = useState({ name: "", phone: "", email: "", property_address: "", amount_due: "", due_date: "" });
   const [addingTenant, setAddingTenant] = useState(false);
   const [addError, setAddError] = useState("");
 
@@ -164,13 +171,32 @@ export default function CampaignDetailPage() {
 
   // Bulk SMS
   const [showBulkSMS, setShowBulkSMS] = useState(false);
-  const [bulkMessage, setBulkMessage] = useState("Bonjour {nom}, ceci est un rappel concernant votre loyer. Merci de régulariser votre situation. — OutcallsAI");
+  const [bulkMessage, setBulkMessage] = useState("Bonjour {nom}, ceci est un rappel concernant votre loyer. Merci de régulariser votre situation. — Recovia");
   const [bulkFilter, setBulkFilter] = useState<string>("");
   const [sendingBulk, setSendingBulk] = useState(false);
   const [bulkResult, setBulkResult] = useState<{sent: number; failed: number} | null>(null);
 
   // Message history
   const [tenantMessages, setTenantMessages] = useState<Record<string, Array<{id: string; channel: string; content: string; status: string; created_at: string}>>>({});
+
+  // Schedule
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [scheduleDate, setScheduleDate] = useState("");
+  const [scheduleTime, setScheduleTime] = useState("10:00");
+  const [scheduling, setScheduling] = useState(false);
+
+  // Stats
+  const [campaignStats, setCampaignStats] = useState<{
+    total_calls: number;
+    total_duration_seconds: number;
+    avg_call_duration_seconds: number;
+    success_rate: number;
+    contact_rate: number;
+    recoverable: number;
+    lost: number;
+    total_due: number;
+  } | null>(null);
+  const [exporting, setExporting] = useState(false);
 
   // Active tab
   const [activeTab, setActiveTab] = useState<"tenants" | "import">("tenants");
@@ -180,6 +206,9 @@ export default function CampaignDetailPage() {
       const [c, t] = await Promise.all([getCampaign(id), getTenants(id)]);
       setCampaign(c);
       setTenants(t);
+      if (c.status === "completed" || c.status === "paused") {
+        getCampaignStats(id).then(setCampaignStats).catch(() => {});
+      }
     } catch { /* handled */ }
     finally { setLoading(false); }
   }, [id]);
@@ -201,10 +230,13 @@ export default function CampaignDetailPage() {
     setUploadError("");
     try {
       await uploadCSV(id, file);
+      toast.success("CSV importé avec succès");
       await loadData();
       setActiveTab("tenants");
     } catch (err: unknown) {
-      setUploadError(err instanceof Error ? err.message : "Erreur upload");
+      const msg = err instanceof Error ? err.message : "Erreur upload";
+      setUploadError(msg);
+      toast.error(msg);
     } finally {
       setUploading(false);
       e.target.value = "";
@@ -219,15 +251,19 @@ export default function CampaignDetailPage() {
       await addTenant(id, {
         name: addForm.name,
         phone: addForm.phone,
+        email: addForm.email || undefined,
         property_address: addForm.property_address,
         amount_due: parseFloat(addForm.amount_due),
         due_date: addForm.due_date,
       });
-      setAddForm({ name: "", phone: "", property_address: "", amount_due: "", due_date: "" });
+      setAddForm({ name: "", phone: "", email: "", property_address: "", amount_due: "", due_date: "" });
       setShowAddForm(false);
+      toast.success("Locataire ajouté");
       await loadData();
     } catch (err: unknown) {
-      setAddError(err instanceof Error ? err.message : "Erreur");
+      const msg = err instanceof Error ? err.message : "Erreur";
+      setAddError(msg);
+      toast.error(msg);
     } finally {
       setAddingTenant(false);
     }
@@ -237,27 +273,39 @@ export default function CampaignDetailPage() {
     setDeletingTenant(tenantId);
     try {
       await deleteTenant(tenantId);
+      toast.success("Locataire supprimé");
       await loadData();
       if (expandedTenant === tenantId) setExpandedTenant(null);
-    } catch { /* handled */ }
+    } catch { toast.error("Impossible de supprimer le locataire"); }
     finally { setDeletingTenant(null); }
   }
 
   async function handleStart() {
-    try { await startCampaign(id); await loadData(); } catch { /* handled */ }
+    try {
+      await startCampaign(id);
+      toast.success("Campagne lancée — les appels démarrent");
+      await loadData();
+    } catch (err: unknown) {
+      toast.error(err instanceof Error ? err.message : "Impossible de lancer la campagne");
+    }
   }
 
   async function handlePause() {
-    try { await pauseCampaign(id); await loadData(); } catch { /* handled */ }
+    try {
+      await pauseCampaign(id);
+      toast.info("Campagne mise en pause");
+      await loadData();
+    } catch { toast.error("Impossible de mettre en pause"); }
   }
 
   async function handleReset() {
     setResetting(true);
     try {
       await resetCampaign(id);
+      toast.success("Campagne réinitialisée");
       await loadData();
       setShowResetModal(false);
-    } catch { /* handled */ }
+    } catch { toast.error("Impossible de réinitialiser"); }
     finally { setResetting(false); }
   }
 
@@ -265,9 +313,23 @@ export default function CampaignDetailPage() {
     setDeletingCampaign(true);
     try {
       await deleteCampaign(id);
+      toast.success("Campagne supprimée");
       router.push("/dashboard");
-    } catch { /* handled */ }
+    } catch { toast.error("Impossible de supprimer"); }
     finally { setDeletingCampaign(false); }
+  }
+
+  async function handleSchedule() {
+    if (!scheduleDate || !scheduleTime) return;
+    setScheduling(true);
+    try {
+      const isoDate = new Date(`${scheduleDate}T${scheduleTime}:00`).toISOString();
+      await scheduleCampaign(id, isoDate);
+      toast.success(`Campagne planifiée pour le ${scheduleDate} à ${scheduleTime}`);
+      await loadData();
+      setShowScheduleModal(false);
+    } catch { toast.error("Impossible de planifier la campagne"); }
+    finally { setScheduling(false); }
   }
 
   async function handleSendSMS() {
@@ -277,13 +339,16 @@ export default function CampaignDetailPage() {
     try {
       await sendSMS(smsTarget.id, smsMessage);
       setSmsResult({ ok: true, text: "SMS envoyé avec succès" });
+      toast.success("SMS envoyé");
       setSmsMessage("");
       if (tenantMessages[smsTarget.id]) {
         const msgs = await getMessageHistory(smsTarget.id);
         setTenantMessages((prev) => ({ ...prev, [smsTarget.id]: msgs }));
       }
     } catch (err: unknown) {
-      setSmsResult({ ok: false, text: err instanceof Error ? err.message : "Erreur" });
+      const msg = err instanceof Error ? err.message : "Erreur";
+      setSmsResult({ ok: false, text: msg });
+      toast.error(msg);
     } finally {
       setSendingSMS(false);
     }
@@ -361,8 +426,9 @@ export default function CampaignDetailPage() {
 
   if (!campaign) return <div className="p-8 text-gray-500">Campagne introuvable</div>;
 
-  const isEditable = campaign.status === "draft" || campaign.status === "paused";
+  const isEditable = campaign.status === "draft" || campaign.status === "paused" || campaign.status === "scheduled";
   const isCompleted = campaign.status === "completed";
+  const isScheduled = campaign.status === "scheduled";
 
   return (
     <div className="p-6 lg:p-8 max-w-[1400px]">
@@ -391,6 +457,11 @@ export default function CampaignDetailPage() {
                 <CheckCircle2 className="h-3 w-3" /> Terminée
               </span>
             )}
+            {isScheduled && campaign.scheduled_at && (
+              <span className="flex items-center gap-1 rounded-full bg-purple-50 px-3 py-1 text-xs font-semibold text-purple-700 ring-1 ring-purple-200">
+                <Clock className="h-3 w-3" /> Planifiée — {new Date(campaign.scheduled_at).toLocaleString("fr-BE", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" })}
+              </span>
+            )}
           </div>
           <p className="mt-1.5 text-sm text-gray-500">
             {stats.total} locataires &middot; {stats.processed} traités &middot; {stats.pending} en attente
@@ -403,10 +474,23 @@ export default function CampaignDetailPage() {
           </button>
 
           {stats.total > 0 && (
-            <button onClick={() => router.push(`/dashboard/campaigns/${id}/report`)}
-              className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-500 hover:text-emerald-600 hover:border-emerald-300 transition-all">
-              <FileDown className="h-3.5 w-3.5" /> Rapport
-            </button>
+            <>
+              <button onClick={() => router.push(`/dashboard/campaigns/${id}/report`)}
+                className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-500 hover:text-emerald-600 hover:border-emerald-300 transition-all">
+                <FileDown className="h-3.5 w-3.5" /> Rapport
+              </button>
+              <button
+                onClick={async () => {
+                  setExporting(true);
+                  try { await exportCampaignCSV(id); toast.success("CSV téléchargé"); } catch { toast.error("Erreur export CSV"); }
+                  finally { setExporting(false); }
+                }}
+                disabled={exporting}
+                className="flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-500 hover:text-blue-600 hover:border-blue-300 transition-all disabled:opacity-50">
+                {exporting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FileText className="h-3.5 w-3.5" />}
+                Export CSV
+              </button>
+            </>
           )}
 
           {(isEditable || isCompleted) && (
@@ -424,10 +508,16 @@ export default function CampaignDetailPage() {
           )}
 
           {isEditable ? (
-            <button onClick={handleStart} disabled={stats.pending === 0}
-              className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-40 transition-all">
-              <Play className="h-4 w-4" /> Lancer les appels
-            </button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowScheduleModal(true)} disabled={stats.pending === 0}
+                className="flex items-center gap-2 rounded-lg border border-purple-200 bg-purple-50 px-4 py-2 text-sm font-medium text-purple-700 hover:bg-purple-100 disabled:opacity-40 transition-all">
+                <Clock className="h-4 w-4" /> Planifier
+              </button>
+              <button onClick={handleStart} disabled={stats.pending === 0}
+                className="flex items-center gap-2 rounded-lg bg-emerald-600 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-40 transition-all">
+                <Play className="h-4 w-4" /> Lancer maintenant
+              </button>
+            </div>
           ) : campaign.status === "running" ? (
             <button onClick={handlePause}
               className="flex items-center gap-2 rounded-lg bg-amber-500 px-5 py-2 text-sm font-semibold text-white shadow-sm hover:bg-amber-600 transition-all">
@@ -480,6 +570,49 @@ export default function CampaignDetailPage() {
           </div>
         ))}
       </div>
+
+      {/* ── Campaign summary (completed/paused) ── */}
+      {campaignStats && (isCompleted || campaign.status === "paused") && (
+        <div className="mb-6 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50 to-white p-6">
+          <h3 className="text-sm font-bold uppercase tracking-wider text-emerald-600 mb-4">Bilan de la campagne</h3>
+          <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+            <div>
+              <p className="text-2xl font-bold text-emerald-600">{campaignStats.success_rate}%</p>
+              <p className="text-xs text-gray-500">Taux de promesses</p>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-blue-600">{campaignStats.contact_rate}%</p>
+              <p className="text-xs text-gray-500">Taux de contact</p>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1e293b]">{campaignStats.total_calls}</p>
+              <p className="text-xs text-gray-500">Appels passés</p>
+            </div>
+            <div>
+              <p className="text-2xl font-bold text-[#1e293b]">
+                {Math.floor(campaignStats.avg_call_duration_seconds / 60)}:{String(campaignStats.avg_call_duration_seconds % 60).padStart(2, "0")}
+              </p>
+              <p className="text-xs text-gray-500">Durée moyenne</p>
+            </div>
+          </div>
+          <div className="mt-4 grid grid-cols-3 gap-3">
+            <div className="rounded-xl bg-emerald-100/50 p-3 text-center">
+              <p className="text-lg font-bold text-emerald-700">{campaignStats.recoverable.toLocaleString("fr-BE")}€</p>
+              <p className="text-[10px] uppercase tracking-wider text-emerald-600">Récupérable</p>
+            </div>
+            <div className="rounded-xl bg-red-100/50 p-3 text-center">
+              <p className="text-lg font-bold text-red-600">{campaignStats.lost.toLocaleString("fr-BE")}€</p>
+              <p className="text-[10px] uppercase tracking-wider text-red-500">Perdu / Escaladé</p>
+            </div>
+            <div className="rounded-xl bg-gray-100 p-3 text-center">
+              <p className="text-lg font-bold text-[#1e293b]">
+                {Math.floor(campaignStats.total_duration_seconds / 60)} min
+              </p>
+              <p className="text-[10px] uppercase tracking-wider text-gray-500">Temps total d&apos;appel</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Tabs ── */}
       <div className="mb-5 flex items-center justify-between border-b border-gray-200">
@@ -601,6 +734,11 @@ export default function CampaignDetailPage() {
                     placeholder="+32470123456" className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
                 </div>
                 <div>
+                  <label className="mb-1 flex items-center gap-1.5 text-xs text-gray-500"><Mail className="h-3 w-3" /> Email (optionnel)</label>
+                  <input type="email" value={addForm.email} onChange={(e) => setAddForm({ ...addForm, email: e.target.value })}
+                    placeholder="jean@email.be" className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
+                </div>
+                <div>
                   <label className="mb-1 flex items-center gap-1.5 text-xs text-gray-500"><MapPin className="h-3 w-3" /> Adresse du bien</label>
                   <input type="text" required value={addForm.property_address} onChange={(e) => setAddForm({ ...addForm, property_address: e.target.value })}
                     placeholder="Rue de la Loi 16, 1000 Bruxelles" className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-400 focus:ring-1 focus:ring-emerald-200" />
@@ -697,6 +835,11 @@ export default function CampaignDetailPage() {
                           <InfoCell icon={<Clock className="h-3.5 w-3.5" />} label="Dernier appel"
                             value={t.last_called_at ? new Date(t.last_called_at).toLocaleString("fr-BE") : "—"} />
                         </div>
+                        {t.email && (
+                          <div className="mb-3 flex items-center gap-2 text-sm text-gray-500">
+                            <Mail className="h-3.5 w-3.5" /> {t.email}
+                          </div>
+                        )}
 
                         {t.status_notes && (
                           <div className="mb-3 rounded-xl bg-blue-50 px-4 py-3 ring-1 ring-blue-100">
@@ -797,10 +940,25 @@ export default function CampaignDetailPage() {
 
                         {/* Actions: SMS, Delete */}
                         <div className="mt-5 flex items-center justify-between border-t border-gray-100 pt-4">
-                          <button onClick={(e) => { e.stopPropagation(); openSMSForTenant(t); }}
-                            className="flex items-center gap-1.5 rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-100 transition-all ring-1 ring-blue-200">
-                            <MessageSquareText className="h-3 w-3" /> Envoyer un SMS
-                          </button>
+                          <div className="flex items-center gap-2">
+                            <button onClick={(e) => { e.stopPropagation(); openSMSForTenant(t); }}
+                              className="flex items-center gap-1.5 rounded-lg bg-blue-50 px-3 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-100 transition-all ring-1 ring-blue-200">
+                              <MessageSquareText className="h-3 w-3" /> SMS
+                            </button>
+                            {t.email && (
+                              <button onClick={async (e) => {
+                                e.stopPropagation();
+                                try {
+                                  const { sendEmail: sendEmailApi } = await import("@/lib/api");
+                                  await sendEmailApi(t.id, t.email!);
+                                  loadTenantMessages(t.id);
+                                } catch { /* handled */ }
+                              }}
+                                className="flex items-center gap-1.5 rounded-lg bg-purple-50 px-3 py-1.5 text-xs font-medium text-purple-600 hover:bg-purple-100 transition-all ring-1 ring-purple-200">
+                                <Mail className="h-3 w-3" /> Email
+                              </button>
+                            )}
+                          </div>
                           {isEditable && (
                             <button onClick={(e) => { e.stopPropagation(); handleDeleteTenant(t.id); }}
                               disabled={deletingTenant === t.id}
@@ -960,6 +1118,45 @@ export default function CampaignDetailPage() {
                 className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-600 py-2.5 text-sm font-semibold text-white hover:bg-emerald-700 disabled:opacity-50 transition-colors">
                 {sendingBulk ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
                 {sendingBulk ? "Envoi..." : `Envoyer à ${bulkFilter ? tenants.filter(t => t.status === bulkFilter).length : tenants.length} locataires`}
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {/* ── Schedule modal ── */}
+      {showScheduleModal && (
+        <Modal onClose={() => setShowScheduleModal(false)}>
+          <div className="text-center">
+            <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-purple-100">
+              <Clock className="h-7 w-7 text-purple-600" />
+            </div>
+            <h2 className="text-lg font-bold">Planifier la campagne</h2>
+            <p className="mt-2 text-sm text-gray-500">
+              Les appels démarreront automatiquement à l&apos;heure choisie.
+            </p>
+            <div className="mt-5 grid grid-cols-2 gap-3 text-left">
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">Date</label>
+                <input type="date" value={scheduleDate} onChange={(e) => setScheduleDate(e.target.value)}
+                  min={new Date().toISOString().split("T")[0]}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-200" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs text-gray-500">Heure</label>
+                <input type="time" value={scheduleTime} onChange={(e) => setScheduleTime(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-sm outline-none focus:border-purple-400 focus:ring-1 focus:ring-purple-200" />
+              </div>
+            </div>
+            <div className="mt-6 flex gap-3">
+              <button onClick={() => setShowScheduleModal(false)}
+                className="flex-1 rounded-xl border border-gray-200 py-2.5 text-sm font-medium text-gray-600 hover:bg-gray-50 transition-colors">
+                Annuler
+              </button>
+              <button onClick={handleSchedule} disabled={scheduling || !scheduleDate}
+                className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-purple-600 py-2.5 text-sm font-semibold text-white hover:bg-purple-700 disabled:opacity-50 transition-colors">
+                {scheduling ? <Loader2 className="h-4 w-4 animate-spin" /> : <Clock className="h-4 w-4" />}
+                {scheduling ? "Planification..." : "Planifier"}
               </button>
             </div>
           </div>

@@ -23,8 +23,8 @@ logging.getLogger("websockets").setLevel(logging.WARNING)
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 app = FastAPI(
-    title="OutcallsAI",
-    description="Outil d'appels sortants IA pour le recouvrement de loyers",
+    title="Recovia",
+    description="Recouvrement de loyers automatisé par IA vocale",
     version="0.1.0",
 )
 
@@ -53,7 +53,7 @@ app.include_router(messaging.router, prefix="/api")
 @app.get("/api/health")
 @limiter.exempt
 async def health(request: Request):
-    return {"status": "ok", "service": "OutcallsAI"}
+    return {"status": "ok", "service": "Recovia"}
 
 
 @app.post("/api/admin/retention")
@@ -62,3 +62,49 @@ async def run_retention(request: Request):
     from app.services.retention import cleanup_old_call_data
     count = await cleanup_old_call_data()
     return {"cleaned": count}
+
+
+@app.on_event("startup")
+async def start_scheduler():
+    import asyncio
+    asyncio.create_task(_campaign_scheduler())
+
+
+async def _campaign_scheduler():
+    """Check every 30s for campaigns scheduled to start now."""
+    import asyncio
+    from datetime import datetime, timezone
+    from app.database import get_supabase
+
+    logger = logging.getLogger("scheduler")
+    logger.info("Campaign scheduler started")
+
+    while True:
+        try:
+            await asyncio.sleep(30)
+            db = get_supabase()
+            now = datetime.now(timezone.utc).isoformat()
+
+            scheduled = db.table("campaigns") \
+                .select("id") \
+                .eq("status", "scheduled") \
+                .lte("scheduled_at", now) \
+                .execute()
+
+            for camp in (scheduled.data or []):
+                cid = camp["id"]
+                logger.info(f"Scheduler: launching campaign {cid}")
+
+                pending = db.table("tenants").select("id").eq("campaign_id", cid).eq("status", "pending").execute()
+                if not pending.data:
+                    logger.info(f"Scheduler: campaign {cid} has no pending tenants, marking completed")
+                    db.table("campaigns").update({"status": "completed"}).eq("id", cid).execute()
+                    continue
+
+                db.table("campaigns").update({"status": "running"}).eq("id", cid).execute()
+
+                from app.services.campaign_runner import start_campaign_calls
+                asyncio.create_task(start_campaign_calls(cid))
+
+        except Exception as e:
+            logger.error(f"Scheduler error: {e}")

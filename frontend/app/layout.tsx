@@ -5,8 +5,8 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "OutcallsAI — Relances de loyer automatisées",
-  description: "Automatisez vos appels de relance de loyer avec l'IA",
+  title: "Recovia — Relances de loyer automatisées par IA",
+  description: "Automatisez vos appels de relance de loyer avec l'IA vocale. Recouvrement intelligent pour agences immobilières.",
 };
 
 export default function RootLayout({

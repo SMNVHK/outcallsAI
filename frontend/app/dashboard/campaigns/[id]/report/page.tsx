@@ -220,7 +220,7 @@ export default function ReportPage() {
 
       {/* Footer */}
       <div className="mt-8 border-t border-gray-200 pt-4 text-center text-xs text-gray-400">
-        <p>Rapport généré automatiquement par OutcallsAI — {report.agency.name}</p>
+        <p>Rapport généré automatiquement par Recovia — {report.agency.name}</p>
         <p>{new Date(report.generated_at).toLocaleString("fr-BE")}</p>
         <p className="mt-1">Ce document constitue une preuve de relance effectuée par voie téléphonique automatisée.</p>
       </div>
