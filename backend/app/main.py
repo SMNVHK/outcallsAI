@@ -2,6 +2,7 @@ import logging
 import sys
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -49,11 +50,18 @@ app.include_router(campaigns.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
 app.include_router(messaging.router, prefix="/api")
 
+_logger = logging.getLogger("recovia")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    _logger.error(f"Unhandled error on {request.method} {request.url.path}: {type(exc).__name__}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": f"Erreur interne: {str(exc)}"})
+
 
 @app.get("/api/health")
 @limiter.exempt
 async def health(request: Request):
-    return {"status": "ok", "service": "Recovia"}
+    return {"status": "ok", "service": "Recovia", "version": "0.2.0"}
 
 
 @app.post("/api/admin/retention")

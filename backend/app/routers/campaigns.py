@@ -4,6 +4,9 @@ from typing import Optional
 from datetime import datetime, timezone
 import csv
 import io
+import logging
+
+logger = logging.getLogger(__name__)
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -250,21 +253,32 @@ async def schedule_campaign(
     agency_id: str = Depends(get_current_agency_id),
 ):
     """Planifier le lancement d'une campagne à une date/heure précise."""
-    db = get_supabase()
+    try:
+        logger.info(f"[SCHEDULE] campaign_id={campaign_id} scheduled_at={data.scheduled_at} agency={agency_id}")
+        db = get_supabase()
 
-    campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()
-    if not campaign.data:
-        raise HTTPException(status_code=404, detail="Campagne introuvable")
+        campaign = db.table("campaigns").select("*").eq("id", campaign_id).eq("agency_id", agency_id).execute()
+        if not campaign.data:
+            raise HTTPException(status_code=404, detail="Campagne introuvable")
 
-    if campaign.data[0]["status"] not in ("draft", "paused", "completed"):
-        raise HTTPException(status_code=400, detail="La campagne ne peut pas être planifiée dans cet état")
+        current_status = campaign.data[0]["status"]
+        logger.info(f"[SCHEDULE] current status={current_status}")
 
-    db.table("campaigns").update({
-        "status": "scheduled",
-        "scheduled_at": data.scheduled_at,
-    }).eq("id", campaign_id).execute()
+        if current_status not in ("draft", "paused", "completed"):
+            raise HTTPException(status_code=400, detail=f"La campagne ne peut pas être planifiée (statut: {current_status})")
 
-    return {"message": f"Campagne planifiée pour {data.scheduled_at}"}
+        result = db.table("campaigns").update({
+            "status": "scheduled",
+            "scheduled_at": data.scheduled_at,
+        }).eq("id", campaign_id).execute()
+        logger.info(f"[SCHEDULE] update result: {result.data}")
+
+        return {"message": f"Campagne planifiée pour {data.scheduled_at}"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"[SCHEDULE] error: {type(e).__name__}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Erreur serveur: {str(e)}")
 
 
 @router.post("/{campaign_id}/reset")
