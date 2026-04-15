@@ -1,18 +1,6 @@
 services:
-  caddy:
-    image: caddy:2-alpine
-    container_name: recovia-caddy
-    network_mode: host
-    volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile
-      - caddy_data:/data
-      - caddy_config:/config
-    environment:
-      - SITE_ADDRESS=${SITE_ADDRESS:-localhost}
-    depends_on:
-      - frontend
-      - backend
-    restart: unless-stopped
+  # caddy: désactivé — Traefik gère déjà le port 443 sur ce VPS
+  # Sera remplacé par un reverse proxy propre à l'étape hébergement
 
   asterisk:
     build: ./asterisk
@@ -44,6 +32,3 @@ services:
       - backend
     restart: unless-stopped
 
-volumes:
-  caddy_data:
-  caddy_config:
