@@ -89,6 +89,10 @@ class CampaignCreate(BaseModel):
     scheduled_at: Optional[datetime] = None
 
 
+class CampaignSchedule(BaseModel):
+    scheduled_at: str
+
+
 class CampaignResponse(BaseModel):
     id: str
     agency_id: str

@@ -259,8 +259,7 @@ export default function SettingsPage() {
             <IntegrationRow
               name="Resend"
               description="Envoi d'emails transactionnels"
-              status="pending"
-              action="Configurer"
+              status="connected"
             />
             <IntegrationRow
               name="DIDWW SMS"

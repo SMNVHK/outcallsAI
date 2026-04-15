@@ -9,7 +9,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.models import (
-    CampaignCreate, CampaignResponse, CampaignStatus,
+    CampaignCreate, CampaignResponse, CampaignStatus, CampaignSchedule,
     TenantCSVRow, TenantResponse,
 )
 from app.database import get_supabase
@@ -246,7 +246,7 @@ async def start_campaign(request: Request, campaign_id: str, agency_id: str = De
 @router.post("/{campaign_id}/schedule")
 async def schedule_campaign(
     campaign_id: str,
-    data: dict,
+    data: CampaignSchedule,
     agency_id: str = Depends(get_current_agency_id),
 ):
     """Planifier le lancement d'une campagne à une date/heure précise."""
@@ -259,16 +259,12 @@ async def schedule_campaign(
     if campaign.data[0]["status"] not in ("draft", "paused", "completed"):
         raise HTTPException(status_code=400, detail="La campagne ne peut pas être planifiée dans cet état")
 
-    scheduled_at = data.get("scheduled_at")
-    if not scheduled_at:
-        raise HTTPException(status_code=400, detail="Date de planification requise (scheduled_at)")
-
     db.table("campaigns").update({
         "status": "scheduled",
-        "scheduled_at": scheduled_at,
+        "scheduled_at": data.scheduled_at,
     }).eq("id", campaign_id).execute()
 
-    return {"message": f"Campagne planifiée pour {scheduled_at}"}
+    return {"message": f"Campagne planifiée pour {data.scheduled_at}"}
 
 
 @router.post("/{campaign_id}/reset")
