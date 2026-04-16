@@ -328,9 +328,11 @@ async def _bridge_rtp_to_openai(
     call_active = True
     human_speech_detected = False
     hanging_up = False
+    ai_first_response_done = False
+    last_activity_time = asyncio.get_event_loop().time()
 
     MAX_CALL_DURATION = 300
-    INITIAL_SILENCE_TIMEOUT = 15
+    NO_INTERACTION_TIMEOUT = 45
     HANGUP_GRACE_PERIOD = 5
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -462,7 +464,8 @@ async def _bridge_rtp_to_openai(
 
             # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():
-                nonlocal tenant_status, tenant_notes, call_active, hanging_up, human_speech_detected
+                nonlocal tenant_status, tenant_notes, call_active, hanging_up
+                nonlocal human_speech_detected, ai_first_response_done, last_activity_time
                 nonlocal current_response_id, current_output_item_id, current_output_content_index
                 nonlocal played_item_id, played_audio_ms, playout_started, need_marker
 
@@ -500,6 +503,7 @@ async def _bridge_rtp_to_openai(
 
                     elif evt_type == "input_audio_buffer.speech_started":
                         human_speech_detected = True
+                        last_activity_time = asyncio.get_event_loop().time()
                         if hanging_up:
                             logger.info("Speech detected during hangup — ignoring (call ending)")
                             continue
@@ -525,6 +529,10 @@ async def _bridge_rtp_to_openai(
                             current_output_content_index = 0
 
                     elif evt_type == "response.done":
+                        last_activity_time = asyncio.get_event_loop().time()
+                        if not ai_first_response_done:
+                            ai_first_response_done = True
+                            logger.info("AI first response completed — no-interaction timer now active")
                         current_response_id = None
                         current_output_item_id = None
                         current_output_content_index = 0
@@ -583,29 +591,46 @@ async def _bridge_rtp_to_openai(
 
                 logger.info(f"openai_to_rtp loop ended after {msg_count} messages (WS closed or break)")
 
-            async def silence_watchdog():
-                """Detect voicemail/silence: if no human speech after INITIAL_SILENCE_TIMEOUT, end call."""
-                await asyncio.sleep(INITIAL_SILENCE_TIMEOUT)
-                if not human_speech_detected and call_active:
-                    logger.warning(f"No human speech detected after {INITIAL_SILENCE_TIMEOUT}s — likely voicemail or no answer")
-                    nonlocal tenant_status, tenant_notes
-                    if not tenant_status:
-                        tenant_status = "voicemail"
-                        tenant_notes = f"Aucune voix humaine détectée après {INITIAL_SILENCE_TIMEOUT}s. Probable messagerie vocale ou silence."
-                    call_ended_event.set()
+            async def no_interaction_watchdog():
+                """
+                Safety net: if AI has finished greeting and no human interaction
+                for NO_INTERACTION_TIMEOUT seconds, hang up.
+                Waits for AI to finish first response before starting the timer.
+                Polls every 5s — not a sleep-then-check, so any new interaction
+                resets the clock via last_activity_time.
+                """
+                nonlocal tenant_status, tenant_notes
+                while call_active and not call_ended_event.is_set() and not hanging_up:
+                    await asyncio.sleep(5)
+                    if not ai_first_response_done:
+                        continue
+                    elapsed = asyncio.get_event_loop().time() - last_activity_time
+                    if elapsed >= NO_INTERACTION_TIMEOUT:
+                        logger.warning(
+                            f"No interaction for {elapsed:.0f}s after AI response — "
+                            f"human_speech_detected={human_speech_detected}, ending call"
+                        )
+                        if not tenant_status:
+                            tenant_status = "voicemail" if not human_speech_detected else "no_answer"
+                            tenant_notes = (
+                                f"Aucune interaction pendant {elapsed:.0f}s. "
+                                f"{'Probable messagerie vocale.' if not human_speech_detected else 'Le locataire a cessé de répondre.'}"
+                            )
+                        call_ended_event.set()
+                        return
 
             rtp_task = asyncio.create_task(rtp_to_openai())
             sender_task = asyncio.create_task(rtp_sender())
             openai_task = asyncio.create_task(openai_to_rtp())
             ended_task = asyncio.create_task(call_ended_event.wait())
-            watchdog_task = asyncio.create_task(silence_watchdog())
+            watchdog_task = asyncio.create_task(no_interaction_watchdog())
 
             task_names = {
                 id(rtp_task): "rtp_to_openai",
                 id(sender_task): "rtp_sender",
                 id(openai_task): "openai_to_rtp",
                 id(ended_task): "call_ended_wait",
-                id(watchdog_task): "silence_watchdog",
+                id(watchdog_task): "no_interaction_watchdog",
             }
 
             try:
@@ -618,7 +643,11 @@ async def _bridge_rtp_to_openai(
                 for t in done:
                     if t.exception():
                         logger.error(f"Task {task_names.get(id(t), '?')} crashed: {t.exception()}")
-                logger.info(f"Audio bridge ended — finished tasks: {finished}")
+                logger.info(
+                    f"Audio bridge ended — finished: {finished} | "
+                    f"human_spoke={human_speech_detected} | ai_responded={ai_first_response_done} | "
+                    f"hanging_up={hanging_up}"
+                )
             finally:
                 call_active = False
                 for t in [rtp_task, sender_task, openai_task, ended_task, watchdog_task]:
