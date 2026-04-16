@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 RTP_PAYLOAD_ULAW = 0
 RTP_SAMPLES_PER_FRAME = 160  # 8000 Hz * 20ms
 RTP_FRAME_DURATION_SEC = 0.02
-RTP_PLAYOUT_PREBUFFER_FRAMES = 3  # 60ms avoids chopped words without sounding slow
+RTP_PLAYOUT_PREBUFFER_FRAMES = 2  # 40ms — minimise la latence de début de réponse
 ULAW_SILENCE_BYTE = 0xFF
 
 
@@ -357,6 +357,9 @@ async def _bridge_rtp_to_openai(
             openai_url,
             additional_headers=headers,
             close_timeout=5,
+            ping_interval=20,
+            ping_timeout=10,
+            max_size=2**23,
         ) as ws:
             logger.info("OpenAI Realtime WebSocket connected")
 
@@ -365,16 +368,17 @@ async def _bridge_rtp_to_openai(
                 "session": {
                     "modalities": ["audio", "text"],
                     "instructions": system_prompt,
-                    "voice": "alloy",
+                    "voice": "coral",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
                     "input_audio_transcription": {"model": "whisper-1"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
-                        "prefix_padding_ms": 300,
-                        "silence_duration_ms": 700,
+                        "threshold": 0.3,
+                        "prefix_padding_ms": 200,
+                        "silence_duration_ms": 300,
                     },
+                    "temperature": 0.7,
                     "tools": tools,
                 },
             }))
