@@ -599,14 +599,17 @@ async def _bridge_rtp_to_openai(
                 """
                 Safety net: if AI has finished greeting and no human interaction
                 for NO_INTERACTION_TIMEOUT seconds, hang up.
-                Waits for AI to finish first response before starting the timer.
-                Polls every 5s — not a sleep-then-check, so any new interaction
-                resets the clock via last_activity_time.
+
+                CRITICAL: this task must NOT complete when hanging_up=True.
+                If it did, asyncio.wait(FIRST_COMPLETED) would trigger early
+                and cancel the end_call grace-period sleep, cutting the goodbye.
+                So when hanging_up is set, we just keep sleeping — the end_call
+                handler is responsible for finishing the call cleanly.
                 """
                 nonlocal tenant_status, tenant_notes
-                while call_active and not call_ended_event.is_set() and not hanging_up:
+                while call_active and not call_ended_event.is_set():
                     await asyncio.sleep(5)
-                    if not ai_first_response_done:
+                    if hanging_up or not ai_first_response_done:
                         continue
                     elapsed = asyncio.get_event_loop().time() - last_activity_time
                     if elapsed >= NO_INTERACTION_TIMEOUT:
