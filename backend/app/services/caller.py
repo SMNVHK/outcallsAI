@@ -374,11 +374,9 @@ async def _bridge_rtp_to_openai(
                     "input_audio_transcription": {"model": "whisper-1"},
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
+                        "threshold": 0.3,
                         "prefix_padding_ms": 200,
-                        "silence_duration_ms": 400,
-                        "interrupt_response": False,
-                        "create_response": True,
+                        "silence_duration_ms": 300,
                     },
                     "temperature": 0.7,
                     "tools": tools,
@@ -513,9 +511,26 @@ async def _bridge_rtp_to_openai(
                         if hanging_up:
                             logger.info("Speech detected during hangup — ignoring (call ending)")
                             continue
-                        # interrupt_response=false : on laisse l'IA finir sa phrase
-                        # Pas de clear du playout buffer, pas de truncate.
-                        logger.info("Tenant speech started (AI will finish current sentence)")
+                        logger.info("Barge-in detected: tenant speech started, clearing local playback")
+
+                        async with playout_lock:
+                            playout_buffer.clear()
+                            playout_started = False
+                            need_marker = True
+
+                        if played_item_id and played_audio_ms > 0:
+                            await ws.send(json.dumps({
+                                "type": "conversation.item.truncate",
+                                "item_id": played_item_id,
+                                "content_index": current_output_content_index,
+                                "audio_end_ms": played_audio_ms,
+                            }))
+                            logger.info(
+                                f"Truncated assistant audio at {played_audio_ms}ms for item {played_item_id}"
+                            )
+                            played_audio_ms = 0
+                            current_output_item_id = None
+                            current_output_content_index = 0
 
                     elif evt_type == "response.done":
                         last_activity_time = asyncio.get_event_loop().time()
