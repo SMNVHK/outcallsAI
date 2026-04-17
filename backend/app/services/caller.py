@@ -333,7 +333,7 @@ async def _bridge_rtp_to_openai(
 
     MAX_CALL_DURATION = 300
     NO_INTERACTION_TIMEOUT = 45
-    HANGUP_GRACE_PERIOD = 5
+    HANGUP_GRACE_PERIOD = 2
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
