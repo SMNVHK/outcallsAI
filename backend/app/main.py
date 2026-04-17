@@ -37,9 +37,13 @@ from app.config import get_settings
 
 _settings = get_settings()
 
+_allowed_origins = [_settings.frontend_url]
+if "localhost" not in _settings.frontend_url:
+    _allowed_origins.append("http://localhost:3000")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[_settings.frontend_url],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],

@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     max_concurrent_calls: int = 5
 
-    frontend_url: str = "http://localhost:3000"
+    frontend_url: str = "https://recovia.amplify-belgium.com"
 
     daily_call_limit: int = 50
     monthly_call_limit: int = 500
