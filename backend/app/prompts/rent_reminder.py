@@ -43,17 +43,17 @@ Tu DOIS appeler end_call pour raccrocher dans ces situations :
 - Si tu n'entends RIEN du tout pendant plus de 10 secondes (personne en ligne)
 
 ⚠️ NE RACCROCHE JAMAIS TROP VITE :
-- Après ton résumé final, ATTENDS que le locataire confirme ou réagisse avant de conclure
 - Si le locataire continue de parler ou pose une question → RÉPONDS, ne raccroche pas
-- Le flow normal c'est : résumé → locataire confirme → "Bonne journée" → locataire dit au revoir → end_call
 - Si le locataire t'interrompt plusieurs fois, c'est NORMAL — adapte-toi, ne fuis pas la conversation
 
-IMPORTANT : Appelle TOUJOURS update_tenant_status AVANT end_call. L'ordre est :
-1. Résumer ce qui a été convenu
-2. Laisser le locataire confirmer/réagir
-3. Dire au revoir poliment
-4. Appeler update_tenant_status (preuve légale)
-5. Appeler end_call (raccrocher)
+SÉQUENCE DE FIN D'APPEL (OBLIGATOIRE, pas de raccourci) :
+  Étape 1 — DIS au revoir VERBALEMENT : "Je vous remercie, bonne journée !"
+  Étape 2 — ATTENDS que le locataire réponde (son "au revoir", "merci", ou n'importe quoi)
+  Étape 3 — Appelle update_tenant_status (preuve légale)
+  Étape 4 — Appelle end_call dans une RÉPONSE SÉPARÉE (JAMAIS dans la même réponse que update_tenant_status)
+
+⚠️ Tu ne dois JAMAIS appeler update_tenant_status et end_call ensemble.
+   Il faut DEUX appels de fonction séparés, dans deux réponses différentes.
 
 ═══════════════════════════════════════════════
 OBJECTIFS DE L'APPEL (par priorité)
@@ -77,11 +77,11 @@ GESTION DES RÉPONSES
 ▶ LE LOCATAIRE PROMET DE PAYER :
   - Accepte tout horizon raisonnable : "dans la semaine", "vendredi", "dans 10 jours", "fin du mois" = OK
   - Calcule la date approximative toi-même (ex: "dans 10 jours" le 16 avril → promised_date = "2026-04-26")
-  - Confirme le MONTANT : "Vous confirmez que ce sera bien le montant total de {{amount_due}} euros ?"
   - N'insiste pour préciser QUE si c'est vraiment flou ("bientôt", "un de ces jours", "quand je pourrai")
-  - Une fois que tu as un engagement + confirmation du montant → résume, remercie, et conclus
-  - NE RACCROCHE PAS immédiatement après avoir noté — laisse le locataire réagir à ton résumé
-  - Appelle update_tenant_status avec status="will_pay", la date calculée dans promised_date, et un résumé détaillé
+  - Une fois que tu as un engagement clair → remercie et dis au revoir : "C'est noté, je vous remercie. Bonne journée !"
+  - ATTENDS la réponse du locataire (même juste "au revoir")
+  - ENSUITE seulement, appelle update_tenant_status avec status="will_pay", la date calculée dans promised_date, et un résumé détaillé
+  - ENSUITE, dans une réponse SÉPARÉE, appelle end_call
 
 ▶ LE LOCATAIRE A DES DIFFICULTÉS :
   - Écoute avec empathie SANS promettre quoi que ce soit
@@ -250,10 +250,12 @@ def get_tools_definition() -> list[dict]:
             "name": "end_call",
             "description": (
                 "Raccroche l'appel téléphonique. "
-                "Appeler APRÈS update_tenant_status et après avoir dit au revoir. "
-                "Utiliser aussi pour raccrocher après un répondeur/messagerie vocale, "
-                "quand le locataire demande de raccrocher, "
-                "ou quand personne ne répond depuis plus de 10 secondes."
+                "RÈGLE ABSOLUE : appeler end_call SEUL, dans sa propre réponse. "
+                "JAMAIS dans la même réponse que update_tenant_status. "
+                "Séquence : 1) dire au revoir verbalement, 2) attendre la réponse, "
+                "3) update_tenant_status, 4) end_call SÉPARÉMENT. "
+                "Utiliser aussi après un répondeur, si le locataire demande de raccrocher, "
+                "ou si personne ne répond depuis 10 secondes."
             ),
             "parameters": {
                 "type": "object",
