@@ -56,11 +56,19 @@ SCRIPT D'OUVERTURE
 DÉTECTION MESSAGERIE VOCALE / RÉPONDEUR
 ═══════════════════════════════════════════════
 
-Si tu détectes que tu parles à une MESSAGERIE VOCALE (indices : bip sonore, message automatique type "laissez votre message", "le correspondant n'est pas disponible", "veuillez laisser un message", silence total sans réponse humaine) :
-1. NE LAISSE PAS de long message
-2. Dis UNIQUEMENT : "Bonjour, l'agence {agency_name} a essayé de vous joindre au sujet de votre loyer. Merci de nous rappeler au {agency_phone}. Bonne journée."
-3. Appelle update_tenant_status avec status="voicemail" et notes="Messagerie vocale — message court laissé"
-4. Appelle IMMÉDIATEMENT end_call pour raccrocher
+Si tu détectes que tu parles à une MESSAGERIE VOCALE (indices : bip sonore, message automatique type "laissez votre message", "le correspondant n'est pas disponible", "veuillez laisser un message", silence prolongé sans réponse humaine) :
+
+SÉQUENCE OBLIGATOIRE POUR RÉPONDEUR (respecte l'ordre, pas de raccourci) :
+
+  Étape 1 — ATTENDS le bip. Si le répondeur parle ("laissez votre message après le bip"), attends que son annonce soit finie.
+  Étape 2 — DIS ton message vocal LENTEMENT et CLAIREMENT, en une seule phrase :
+    "Bonjour, ici l'agence {agency_name}. Nous avons essayé de vous joindre au sujet de votre loyer. Merci de nous rappeler au {agency_phone}. Bonne journée."
+  Étape 3 — ATTENDS 2 secondes de silence après avoir fini de parler (pour que l'audio soit bien transmis)
+  Étape 4 — Appelle update_tenant_status avec status="voicemail" et notes="Messagerie vocale — message court laissé"
+  Étape 5 — Dans une RÉPONSE SÉPARÉE, appelle end_call avec reason="voicemail"
+
+⚠️ NE RACCROCHE PAS avant d'avoir fini de dire ton message vocal en entier.
+⚠️ Le message vocal doit être COURT (une seule phrase) mais COMPLET et AUDIBLE.
 
 ═══════════════════════════════════════════════
 FIN D'APPEL / RACCROCHER
@@ -283,10 +291,10 @@ def get_tools_definition() -> list[dict]:
                 "Raccroche l'appel téléphonique. "
                 "RÈGLE ABSOLUE : appeler end_call SEUL, dans sa propre réponse. "
                 "JAMAIS dans la même réponse que update_tenant_status. "
-                "Séquence : 1) dire au revoir verbalement, 2) attendre la réponse, "
+                "Pour conversation normale : 1) au revoir verbal, 2) attendre réponse, "
                 "3) update_tenant_status, 4) end_call SÉPARÉMENT. "
-                "Utiliser aussi après un répondeur, si le locataire demande de raccrocher, "
-                "ou si personne ne répond depuis 10 secondes."
+                "Pour répondeur/messagerie : 1) dire le message vocal EN ENTIER, "
+                "2) update_tenant_status, 3) end_call SÉPARÉMENT avec reason=voicemail."
             ),
             "parameters": {
                 "type": "object",

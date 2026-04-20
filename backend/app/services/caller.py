@@ -335,7 +335,8 @@ async def _bridge_rtp_to_openai(
 
     MAX_CALL_DURATION = 300
     NO_INTERACTION_TIMEOUT = 45
-    HANGUP_GRACE_PERIOD = 2
+    HANGUP_GRACE_NORMAL = 2
+    HANGUP_GRACE_VOICEMAIL = 8
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
@@ -563,7 +564,8 @@ async def _bridge_rtp_to_openai(
 
                         elif func_name == "end_call":
                             reason = args.get("reason", "conversation_ended")
-                            logger.info(f"AI requested end_call: reason={reason}")
+                            grace = HANGUP_GRACE_VOICEMAIL if reason == "voicemail" else HANGUP_GRACE_NORMAL
+                            logger.info(f"AI requested end_call: reason={reason} grace={grace}s")
                             hanging_up = True
                             await ws.send(json.dumps({
                                 "type": "conversation.item.create",
@@ -573,8 +575,8 @@ async def _bridge_rtp_to_openai(
                                     "output": json.dumps({"success": True, "action": "hanging_up"}),
                                 },
                             }))
-                            logger.info(f"Hanging up in {HANGUP_GRACE_PERIOD}s (letting goodbye audio finish)...")
-                            await asyncio.sleep(HANGUP_GRACE_PERIOD)
+                            logger.info(f"Hanging up in {grace}s (letting audio finish)...")
+                            await asyncio.sleep(grace)
                             logger.info("Grace period over — disconnecting")
                             call_active = False
                             call_ended_event.set()
