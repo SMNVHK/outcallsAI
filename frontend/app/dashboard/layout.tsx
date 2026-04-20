@@ -3,15 +3,33 @@
 import { useEffect, useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import Link from "next/link";
-import { Phone, LogOut, LayoutDashboard, Settings, Menu, X, Shield } from "lucide-react";
+import { Phone, LogOut, LayoutDashboard, Settings, Menu, X, Shield, BarChart3, Users, CalendarDays } from "lucide-react";
 import { ToastProvider } from "@/components/toast";
 
 const NAV_ITEMS = [
   {
     href: "/dashboard",
+    label: "Tableau de bord",
+    icon: BarChart3,
+    exact: true,
+  },
+  {
+    href: "/dashboard/campaigns",
     label: "Campagnes",
     icon: LayoutDashboard,
-    exact: true,
+    exact: false,
+  },
+  {
+    href: "/dashboard/contacts",
+    label: "Contacts",
+    icon: Users,
+    exact: false,
+  },
+  {
+    href: "/dashboard/calendar",
+    label: "Calendrier",
+    icon: CalendarDays,
+    exact: false,
   },
   {
     href: "/dashboard/settings",

@@ -10,6 +10,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
 from app.routers import auth, campaigns, tenants, messaging
+from app.routers.contacts import router as contacts_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +54,7 @@ app.include_router(auth.router, prefix="/api")
 app.include_router(campaigns.router, prefix="/api")
 app.include_router(tenants.router, prefix="/api")
 app.include_router(messaging.router, prefix="/api")
+app.include_router(contacts_router, prefix="/api")
 
 _logger = logging.getLogger("recovia")
 
@@ -80,6 +82,7 @@ async def run_retention(request: Request):
 async def start_scheduler():
     import asyncio
     asyncio.create_task(_campaign_scheduler())
+    asyncio.create_task(_promise_overdue_checker())
 
 
 async def _campaign_scheduler():
@@ -120,3 +123,47 @@ async def _campaign_scheduler():
 
         except Exception as e:
             logger.error(f"Scheduler error: {e}")
+
+
+async def _promise_overdue_checker():
+    """Toutes les 6h, marque les promesses dépassées comme promise_overdue."""
+    import asyncio
+    from datetime import date
+    from app.database import get_supabase
+
+    logger = logging.getLogger("promise_checker")
+    logger.info("Promise overdue checker started")
+
+    while True:
+        try:
+            await asyncio.sleep(6 * 3600)
+            db = get_supabase()
+            today = date.today().isoformat()
+
+            campaigns = db.table("campaigns").select("id").eq("status", "completed").execute()
+            if not campaigns.data:
+                continue
+
+            total_updated = 0
+            for camp in campaigns.data:
+                cid = camp["id"]
+                tenants = db.table("tenants").select("id, promised_date") \
+                    .eq("campaign_id", cid) \
+                    .eq("status", "will_pay") \
+                    .execute()
+
+                for t in (tenants.data or []):
+                    if not t.get("promised_date"):
+                        continue
+                    promised = str(t["promised_date"])[:10]
+                    if promised < today:
+                        db.table("tenants").update({
+                            "status": "promise_overdue"
+                        }).eq("id", t["id"]).execute()
+                        total_updated += 1
+
+            if total_updated > 0:
+                logger.info(f"Promise checker: {total_updated} locataire(s) marqué(s) promise_overdue")
+
+        except Exception as e:
+            logger.error(f"Promise checker error: {e}")

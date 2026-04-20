@@ -18,6 +18,7 @@ class TenantStatus(str, Enum):
     call_dropped = "call_dropped"
     paid = "paid"
     escalated = "escalated"
+    promise_overdue = "promise_overdue"
 
 
 class CampaignStatus(str, Enum):
@@ -61,6 +62,8 @@ class AgencyProfileResponse(BaseModel):
     email: str
     phone: Optional[str] = None
     caller_id: Optional[str] = None
+    ai_tone: Optional[str] = "balanced"
+    ai_custom_notes: Optional[str] = ""
     created_at: str
 
 
@@ -68,6 +71,11 @@ class AgencyProfileUpdate(BaseModel):
     name: Optional[str] = None
     phone: Optional[str] = None
     caller_id: Optional[str] = None
+
+
+class AIConfigUpdate(BaseModel):
+    ai_tone: Optional[str] = None
+    ai_custom_notes: Optional[str] = None
 
 
 class TokenResponse(BaseModel):

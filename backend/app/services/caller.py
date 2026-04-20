@@ -245,6 +245,8 @@ async def make_call(tenant: dict, campaign: dict, agency: dict) -> dict:
                 system_prompt = get_system_prompt(
                     agency_name=agency["name"],
                     agency_phone=agency.get("phone", ""),
+                    ai_tone=agency.get("ai_tone", "balanced"),
+                    ai_custom_notes=agency.get("ai_custom_notes", ""),
                 )
                 system_prompt = system_prompt.replace("{property_address}", tenant["property_address"])
                 system_prompt = system_prompt.replace("{amount_due}", str(tenant["amount_due"]))

@@ -208,6 +208,26 @@ export async function getMessageHistory(tenantId: string) {
   return fetchAPI(`/messaging/history/${tenantId}`);
 }
 
+// ─── Analytics ──────────────────────────────────────────────────
+
+export async function getAnalyticsDashboard() {
+  return fetchAPI("/campaigns/analytics/dashboard");
+}
+
+export async function getOverduePromises() {
+  return fetchAPI("/campaigns/analytics/overdue-promises");
+}
+
+// ─── Contacts ───────────────────────────────────────────────────
+
+export async function getContacts(search?: string, status?: string) {
+  const params = new URLSearchParams();
+  if (search) params.set("search", search);
+  if (status) params.set("status", status);
+  const qs = params.toString();
+  return fetchAPI(`/contacts${qs ? `?${qs}` : ""}`);
+}
+
 // ─── Profile ───────────────────────────────────────────────────
 
 export async function getProfile() {
@@ -220,6 +240,16 @@ export async function updateProfile(data: {
   caller_id?: string;
 }) {
   return fetchAPI("/auth/profile", {
+    method: "PUT",
+    body: JSON.stringify(data),
+  });
+}
+
+export async function updateAIConfig(data: {
+  ai_tone?: string;
+  ai_custom_notes?: string;
+}) {
+  return fetchAPI("/auth/ai-config", {
     method: "PUT",
     body: JSON.stringify(data),
   });

@@ -469,9 +469,11 @@ export default function CampaignDetailPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <button onClick={loadData} className="rounded-lg border border-gray-200 p-2 text-gray-400 hover:text-gray-700 hover:border-gray-300 transition-all" title="Rafraîchir">
-            <RefreshCw className="h-4 w-4" />
-          </button>
+          {campaign.status !== "completed" && (
+            <button onClick={loadData} className="rounded-lg border border-gray-200 p-2 text-gray-400 hover:text-gray-700 hover:border-gray-300 transition-all" title="Rafraîchir les données">
+              <RefreshCw className="h-4 w-4" />
+            </button>
+          )}
 
           {stats.total > 0 && (
             <>

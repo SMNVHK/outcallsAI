@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Request
 from fastapi.responses import StreamingResponse
 from typing import Optional
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta, date
+from collections import defaultdict
 import csv
 import io
 import logging
@@ -20,6 +21,151 @@ from app.routers.deps import get_current_agency_id
 
 router = APIRouter(prefix="/campaigns", tags=["campaigns"])
 limiter = Limiter(key_func=get_remote_address)
+
+
+@router.get("/analytics/dashboard")
+async def get_analytics_dashboard(agency_id: str = Depends(get_current_agency_id)):
+    """KPIs globaux de l'agence toutes campagnes confondues."""
+    db = get_supabase()
+
+    campaigns = db.table("campaigns").select("id, name, status").eq("agency_id", agency_id).execute()
+    if not campaigns.data:
+        return {
+            "total_campaigns": 0, "active_campaigns": 0,
+            "total_tenants": 0, "total_calls": 0,
+            "total_amount_due": 0, "total_recoverable": 0,
+            "total_recovered_rate": 0, "by_status": {},
+            "avg_call_duration_seconds": 0, "promises_due_soon": [],
+            "monthly_trend": [],
+        }
+
+    campaign_ids = [c["id"] for c in campaigns.data]
+    campaign_names = {c["id"]: c["name"] for c in campaigns.data}
+    active_campaigns = sum(1 for c in campaigns.data if c["status"] == "running")
+
+    all_tenants = []
+    for cid in campaign_ids:
+        tenants = db.table("tenants").select(
+            "id, name, phone, status, amount_due, promised_date, campaign_id"
+        ).eq("campaign_id", cid).execute()
+        all_tenants.extend(tenants.data)
+
+    total_amount_due = sum(t["amount_due"] for t in all_tenants)
+    total_recoverable = sum(t["amount_due"] for t in all_tenants if t["status"] == "will_pay")
+    total_recovered_rate = round(total_recoverable / total_amount_due * 100) if total_amount_due > 0 else 0
+
+    by_status: dict[str, int] = {}
+    for t in all_tenants:
+        s = t["status"]
+        by_status[s] = by_status.get(s, 0) + 1
+
+    all_calls = []
+    for cid in campaign_ids:
+        calls = db.table("calls").select(
+            "id, campaign_id, duration_seconds, started_at, tenant_id"
+        ).eq("campaign_id", cid).execute()
+        all_calls.extend(calls.data)
+
+    total_calls = len(all_calls)
+    total_duration = sum(c.get("duration_seconds", 0) or 0 for c in all_calls)
+    avg_duration = round(total_duration / total_calls) if total_calls > 0 else 0
+
+    today = date.today()
+    seven_days = today + timedelta(days=7)
+    promises_due_soon = []
+    for t in all_tenants:
+        if t["status"] == "will_pay" and t.get("promised_date"):
+            try:
+                pd = date.fromisoformat(str(t["promised_date"])[:10])
+                if today <= pd <= seven_days:
+                    promises_due_soon.append({
+                        "tenant_name": t["name"],
+                        "promised_date": str(pd),
+                        "amount_due": t["amount_due"],
+                        "campaign_name": campaign_names.get(t["campaign_id"], ""),
+                        "campaign_id": t["campaign_id"],
+                    })
+            except (ValueError, TypeError):
+                pass
+    promises_due_soon.sort(key=lambda x: x["promised_date"])
+
+    monthly_buckets: dict[str, dict] = defaultdict(lambda: {"calls": 0, "recoverable": 0.0})
+    will_pay_tenant_ids = {t["id"] for t in all_tenants if t["status"] == "will_pay"}
+    tenant_amount_map = {t["id"]: t["amount_due"] for t in all_tenants}
+
+    for call in all_calls:
+        started = call.get("started_at")
+        if not started:
+            continue
+        month_key = str(started)[:7]
+        monthly_buckets[month_key]["calls"] += 1
+        tid = call.get("tenant_id")
+        if tid in will_pay_tenant_ids:
+            monthly_buckets[month_key]["recoverable"] += tenant_amount_map.get(tid, 0)
+
+    monthly_trend = [
+        {"month": m, "calls": d["calls"], "recoverable": d["recoverable"]}
+        for m, d in sorted(monthly_buckets.items())
+    ]
+
+    return {
+        "total_campaigns": len(campaigns.data),
+        "active_campaigns": active_campaigns,
+        "total_tenants": len(all_tenants),
+        "total_calls": total_calls,
+        "total_amount_due": total_amount_due,
+        "total_recoverable": total_recoverable,
+        "total_recovered_rate": total_recovered_rate,
+        "by_status": by_status,
+        "avg_call_duration_seconds": avg_duration,
+        "promises_due_soon": promises_due_soon,
+        "monthly_trend": monthly_trend,
+    }
+
+
+@router.get("/analytics/overdue-promises")
+async def get_overdue_promises(agency_id: str = Depends(get_current_agency_id)):
+    """Locataires ayant promis de payer mais dont la date est dépassée."""
+    db = get_supabase()
+
+    campaigns = db.table("campaigns").select("id, name").eq("agency_id", agency_id).execute()
+    if not campaigns.data:
+        return []
+
+    campaign_ids = [c["id"] for c in campaigns.data]
+    campaign_names = {c["id"]: c["name"] for c in campaigns.data}
+    today = date.today()
+
+    overdue = []
+    for cid in campaign_ids:
+        tenants = db.table("tenants").select(
+            "id, name, phone, property_address, amount_due, promised_date, status, campaign_id"
+        ).eq("campaign_id", cid).in_("status", ["will_pay", "promise_overdue"]).execute()
+
+        for t in tenants.data:
+            if not t.get("promised_date"):
+                continue
+            try:
+                pd = date.fromisoformat(str(t["promised_date"])[:10])
+            except (ValueError, TypeError):
+                continue
+            if pd >= today:
+                continue
+            days_overdue = (today - pd).days
+            overdue.append({
+                "tenant_id": t["id"],
+                "tenant_name": t["name"],
+                "phone": t["phone"],
+                "property_address": t["property_address"],
+                "amount_due": t["amount_due"],
+                "promised_date": str(pd),
+                "days_overdue": days_overdue,
+                "campaign_name": campaign_names.get(t["campaign_id"], ""),
+                "campaign_id": t["campaign_id"],
+            })
+
+    overdue.sort(key=lambda x: x["days_overdue"], reverse=True)
+    return overdue
 
 
 @router.get("/activity")

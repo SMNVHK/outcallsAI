@@ -5,7 +5,7 @@ from passlib.context import CryptContext
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from app.models import AgencyRegister, AgencyLogin, TokenResponse, AgencyProfileResponse, AgencyProfileUpdate
+from app.models import AgencyRegister, AgencyLogin, TokenResponse, AgencyProfileResponse, AgencyProfileUpdate, AIConfigUpdate
 from app.database import get_supabase
 from app.config import get_settings
 from app.routers.deps import get_current_agency_id
@@ -79,7 +79,7 @@ async def login(request: Request, data: AgencyLogin):
 @router.get("/profile", response_model=AgencyProfileResponse)
 async def get_profile(agency_id: str = Depends(get_current_agency_id)):
     db = get_supabase()
-    result = db.table("agencies").select("id, name, email, phone, caller_id, created_at").eq("id", agency_id).execute()
+    result = db.table("agencies").select("id, name, email, phone, caller_id, ai_tone, ai_custom_notes, created_at").eq("id", agency_id).execute()
     if not result.data:
         raise HTTPException(status_code=404, detail="Agence introuvable")
     a = result.data[0]
@@ -89,6 +89,8 @@ async def get_profile(agency_id: str = Depends(get_current_agency_id)):
         email=a["email"],
         phone=a.get("phone"),
         caller_id=a.get("caller_id"),
+        ai_tone=a.get("ai_tone", "balanced"),
+        ai_custom_notes=a.get("ai_custom_notes", ""),
         created_at=str(a.get("created_at", "")),
     )
 
@@ -108,7 +110,7 @@ async def update_profile(data: AgencyProfileUpdate, agency_id: str = Depends(get
         raise HTTPException(status_code=400, detail="Aucune modification")
 
     db.table("agencies").update(update_data).eq("id", agency_id).execute()
-    result = db.table("agencies").select("id, name, email, phone, caller_id, created_at").eq("id", agency_id).execute()
+    result = db.table("agencies").select("id, name, email, phone, caller_id, ai_tone, ai_custom_notes, created_at").eq("id", agency_id).execute()
     a = result.data[0]
     return AgencyProfileResponse(
         id=a["id"],
@@ -116,5 +118,38 @@ async def update_profile(data: AgencyProfileUpdate, agency_id: str = Depends(get
         email=a["email"],
         phone=a.get("phone"),
         caller_id=a.get("caller_id"),
+        ai_tone=a.get("ai_tone", "balanced"),
+        ai_custom_notes=a.get("ai_custom_notes", ""),
+        created_at=str(a.get("created_at", "")),
+    )
+
+
+@router.put("/ai-config", response_model=AgencyProfileResponse)
+async def update_ai_config(data: AIConfigUpdate, agency_id: str = Depends(get_current_agency_id)):
+    db = get_supabase()
+    update_data = {}
+    if data.ai_tone is not None:
+        if data.ai_tone not in ("formal", "balanced", "friendly"):
+            raise HTTPException(status_code=400, detail="Ton invalide. Valeurs: formal, balanced, friendly")
+        update_data["ai_tone"] = data.ai_tone
+    if data.ai_custom_notes is not None:
+        if len(data.ai_custom_notes) > 1000:
+            raise HTTPException(status_code=400, detail="Notes trop longues (max 1000 caractères)")
+        update_data["ai_custom_notes"] = data.ai_custom_notes
+
+    if not update_data:
+        raise HTTPException(status_code=400, detail="Aucune modification")
+
+    db.table("agencies").update(update_data).eq("id", agency_id).execute()
+    result = db.table("agencies").select("id, name, email, phone, caller_id, ai_tone, ai_custom_notes, created_at").eq("id", agency_id).execute()
+    a = result.data[0]
+    return AgencyProfileResponse(
+        id=a["id"],
+        name=a["name"],
+        email=a["email"],
+        phone=a.get("phone"),
+        caller_id=a.get("caller_id"),
+        ai_tone=a.get("ai_tone", "balanced"),
+        ai_custom_notes=a.get("ai_custom_notes", ""),
         created_at=str(a.get("created_at", "")),
     )

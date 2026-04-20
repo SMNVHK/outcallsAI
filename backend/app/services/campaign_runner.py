@@ -257,7 +257,9 @@ async def _send_completion_email(db, campaign_id: str, campaign: dict, agency: d
         if not agency_email:
             return
 
-        tenants = db.table("tenants").select("status, amount_due").eq("campaign_id", campaign_id).execute()
+        tenants = db.table("tenants").select(
+            "status, amount_due, name, promised_date, status_notes"
+        ).eq("campaign_id", campaign_id).execute()
         if not tenants.data:
             return
 
@@ -269,6 +271,29 @@ async def _send_completion_email(db, campaign_id: str, campaign: dict, agency: d
         no_answer = sum(1 for t in tenants.data if t["status"] == "no_answer")
         recoverable = sum(t["amount_due"] for t in tenants.data if t["status"] == "will_pay")
 
+        will_pay_details = [
+            {
+                "name": t.get("name", "—"),
+                "amount": t.get("amount_due", 0),
+                "promised_date": t.get("promised_date", "—") or "—",
+            }
+            for t in tenants.data
+            if t["status"] == "will_pay"
+        ]
+
+        escalated_details = [
+            {
+                "name": t.get("name", "—"),
+                "reason": t.get("status_notes", "Aucune note") or "Aucune note",
+            }
+            for t in tenants.data
+            if t["status"] == "escalated"
+        ]
+
+        dashboard_url = ""
+        if hasattr(settings, "frontend_url") and settings.frontend_url:
+            dashboard_url = f"{settings.frontend_url}/dashboard/campaigns/{campaign_id}/report"
+
         subject, html, text = build_campaign_completed_email(
             campaign_name=campaign.get("name", ""),
             agency_name=agency.get("name", ""),
@@ -279,6 +304,9 @@ async def _send_completion_email(db, campaign_id: str, campaign: dict, agency: d
             escalated=escalated,
             no_answer=no_answer,
             amount_recoverable=recoverable,
+            dashboard_url=dashboard_url,
+            will_pay_details=will_pay_details or None,
+            escalated_details=escalated_details or None,
         )
 
         await send_email(agency_email, subject, html, text)

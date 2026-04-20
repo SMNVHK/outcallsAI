@@ -1,0 +1,11 @@
+name;phone;email;property_address;amount_due;due_date
+Jean Dupont;+32470000001;jean.dupont@email.be;Rue de la Loi 42, 1000 Bruxelles;850;2026-03-01
+Marie Claessens;+32470000002;marie.c@email.be;Avenue Louise 120, 1050 Ixelles;725;2026-03-01
+Lucas Vermeersch;+32470000003;;Chaussée de Waterloo 88, 1060 Saint-Gilles;950;2026-02-15
+Sophie Janssen;+32470000004;s.janssen@email.be;Rue Haute 15, 1000 Bruxelles;680;2026-03-01
+Ahmed El Amrani;+32470000005;;Place du Jeu de Balle 3, 1000 Bruxelles;790;2026-02-01
+Nathalie Peeters;+32470000006;n.peeters@email.be;Boulevard Anspach 55, 1000 Bruxelles;1100;2026-03-01
+Thomas Lambert;+32470000007;;Rue Neuve 22, 1000 Bruxelles;620;2026-02-15
+Isabelle Martens;+32470000008;i.martens@email.be;Avenue de la Toison d'Or 10, 1050 Ixelles;875;2026-03-01
+Kevin Dubois;+32470000009;;Rue du Midi 77, 1000 Bruxelles;540;2026-02-01
+Charlotte Willems;+32470000010;c.willems@email.be;Place Sainte-Catherine 5, 1000 Bruxelles;960;2026-03-01

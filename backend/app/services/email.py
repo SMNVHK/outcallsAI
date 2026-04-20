@@ -103,10 +103,93 @@ def build_campaign_completed_email(
     no_answer: int,
     amount_recoverable: float,
     dashboard_url: str = "",
+    will_pay_details: list[dict] | None = None,
+    escalated_details: list[dict] | None = None,
 ) -> tuple[str, str, str]:
     subject = f"Campagne terminée — {campaign_name}"
 
     success_rate = round(will_pay / total * 100) if total > 0 else 0
+
+    will_pay_section = ""
+    if will_pay_details:
+        rows = ""
+        for t in will_pay_details:
+            rows += (
+                f'<tr style="border-bottom: 1px solid #f1f5f9;">'
+                f'<td style="padding: 10px 12px; color: #334155; font-size: 14px;">{t.get("name", "—")}</td>'
+                f'<td style="padding: 10px 12px; text-align: right; color: #059669; font-weight: 600; font-size: 14px;">{t.get("amount", 0):.0f}€</td>'
+                f'<td style="padding: 10px 12px; text-align: right; color: #6b7280; font-size: 13px;">{t.get("promised_date", "—")}</td>'
+                f'</tr>'
+            )
+        will_pay_section = (
+            f'<div style="margin-top: 28px;">'
+            f'<h3 style="color: #059669; font-size: 15px; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid #d1fae5;">Promesses de paiement</h3>'
+            f'<table style="width: 100%; border-collapse: collapse;">'
+            f'<tr style="background: #f0fdf4;">'
+            f'<th style="padding: 8px 12px; text-align: left; color: #6b7280; font-size: 12px; font-weight: 600; text-transform: uppercase;">Locataire</th>'
+            f'<th style="padding: 8px 12px; text-align: right; color: #6b7280; font-size: 12px; font-weight: 600; text-transform: uppercase;">Montant</th>'
+            f'<th style="padding: 8px 12px; text-align: right; color: #6b7280; font-size: 12px; font-weight: 600; text-transform: uppercase;">Date promise</th>'
+            f'</tr>'
+            f'{rows}'
+            f'</table>'
+            f'</div>'
+        )
+
+    escalated_section = ""
+    if escalated_details:
+        items = ""
+        for t in escalated_details:
+            items += (
+                f'<div style="padding: 10px 14px; border-bottom: 1px solid #fecaca;">'
+                f'<p style="color: #334155; font-size: 14px; font-weight: 600; margin: 0;">{t.get("name", "—")}</p>'
+                f'<p style="color: #6b7280; font-size: 13px; margin: 4px 0 0;">{t.get("reason", "—")}</p>'
+                f'</div>'
+            )
+        escalated_section = (
+            f'<div style="margin-top: 28px;">'
+            f'<h3 style="color: #dc2626; font-size: 15px; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid #fecaca;">Cas escaladés</h3>'
+            f'<div style="background: #fef2f2; border: 1px solid #fecaca; border-radius: 10px; overflow: hidden;">'
+            f'{items}'
+            f'</div>'
+            f'</div>'
+        )
+
+    recommendations = []
+    if will_pay > 0:
+        recommendations.append("Vérifiez les paiements après les dates promises")
+    if cant_pay > 0:
+        recommendations.append("Contactez les locataires en difficulté pour proposer un arrangement")
+    if refuses > 0:
+        recommendations.append(f"{refuses} locataire(s) refusent — envisagez une mise en demeure")
+    if escalated > 0:
+        recommendations.append(f"{escalated} cas nécessitent une intervention humaine urgente")
+    if total > 0 and no_answer > total / 3:
+        recommendations.append("Taux d'injoignables élevé — envisagez des SMS de relance")
+
+    recommendations_section = ""
+    if recommendations:
+        rec_items = ""
+        for rec in recommendations:
+            rec_items += (
+                f'<tr><td style="padding: 6px 0; vertical-align: top; color: #059669; font-size: 14px; width: 20px;">→</td>'
+                f'<td style="padding: 6px 0; color: #334155; font-size: 14px; line-height: 1.5;">{rec}</td></tr>'
+            )
+        recommendations_section = (
+            f'<div style="margin-top: 28px;">'
+            f'<h3 style="color: #334155; font-size: 15px; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid #e2e8f0;">Prochaines étapes recommandées</h3>'
+            f'<div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px;">'
+            f'<table style="width: 100%; border-collapse: collapse;">{rec_items}</table>'
+            f'</div>'
+            f'</div>'
+        )
+
+    dashboard_button = ""
+    if dashboard_url:
+        dashboard_button = (
+            f'<a href="{dashboard_url}" style="display: block; background: #059669; color: white; '
+            f'text-align: center; padding: 14px; border-radius: 10px; text-decoration: none; '
+            f'font-weight: 600; margin-top: 28px; font-size: 15px;">Voir le rapport complet</a>'
+        )
 
     html = f"""
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 32px 0;">
@@ -151,13 +234,36 @@ def build_campaign_completed_email(
             <td style="padding: 10px 0; text-align: right; font-weight: 600;">{no_answer}</td>
           </tr>
         </table>
-        {"<a href='" + dashboard_url + "' style='display: block; background: #059669; color: white; text-align: center; padding: 12px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-top: 24px;'>Voir le rapport complet</a>" if dashboard_url else ""}
+        {will_pay_section}
+        {escalated_section}
+        {recommendations_section}
+        {dashboard_button}
       </div>
       <div style="padding: 16px 32px; border: 1px solid #e2e8f0; border-top: none; border-radius: 0 0 16px 16px; background: #f8fafc;">
         <p style="color: #94a3b8; font-size: 12px; margin: 0;">Recovia — {agency_name}</p>
       </div>
     </div>
     """
+
+    will_pay_text = ""
+    if will_pay_details:
+        will_pay_text = "\nPromesses de paiement :\n"
+        for t in will_pay_details:
+            will_pay_text += f"  - {t.get('name', '—')} : {t.get('amount', 0):.0f}€ (avant le {t.get('promised_date', '—')})\n"
+
+    escalated_text = ""
+    if escalated_details:
+        escalated_text = "\nCas escaladés :\n"
+        for t in escalated_details:
+            escalated_text += f"  - {t.get('name', '—')} : {t.get('reason', '—')}\n"
+
+    recommendations_text = ""
+    if recommendations:
+        recommendations_text = "\nProchaines étapes recommandées :\n"
+        for rec in recommendations:
+            recommendations_text += f"  → {rec}\n"
+
+    dashboard_text = f"\nRapport complet : {dashboard_url}\n" if dashboard_url else ""
 
     text = f"""Campagne terminée : {campaign_name}
 
@@ -169,7 +275,7 @@ Résultats :
 - {escalated} escaladés
 - {no_answer} pas de réponse
 - Montant récupérable : {amount_recoverable:.2f}€
-
+{will_pay_text}{escalated_text}{recommendations_text}{dashboard_text}
 — Recovia / {agency_name}"""
 
     return subject, html, text

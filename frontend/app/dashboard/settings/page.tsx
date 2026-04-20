@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { getProfile, updateProfile } from "@/lib/api";
+import { getProfile, updateProfile, updateAIConfig } from "@/lib/api";
 import { useToast } from "@/components/toast";
 import {
   Loader2,
@@ -16,6 +16,8 @@ import {
   Shield,
   Zap,
   ExternalLink,
+  Bot,
+  MessageSquare,
 } from "lucide-react";
 
 interface Profile {
@@ -24,6 +26,8 @@ interface Profile {
   email: string;
   phone: string | null;
   caller_id: string | null;
+  ai_tone: string | null;
+  ai_custom_notes: string | null;
   created_at: string;
 }
 
@@ -36,6 +40,9 @@ export default function SettingsPage() {
   const [name, setName] = useState("");
   const [phone, setPhone] = useState("");
   const [callerId, setCallerId] = useState("");
+  const [aiTone, setAiTone] = useState("balanced");
+  const [aiNotes, setAiNotes] = useState("");
+  const [savingAI, setSavingAI] = useState(false);
 
   useEffect(() => {
     loadProfile();
@@ -48,6 +55,8 @@ export default function SettingsPage() {
       setName(data.name || "");
       setPhone(data.phone || "");
       setCallerId(data.caller_id || "");
+      setAiTone(data.ai_tone || "balanced");
+      setAiNotes(data.ai_custom_notes || "");
     } catch {
       toast.error("Impossible de charger le profil");
     } finally {
@@ -190,6 +199,77 @@ export default function SettingsPage() {
             </button>
           </div>
         </form>
+
+        {/* AI Customization */}
+        <div className="rounded-2xl border border-gray-200 bg-white p-6">
+          <h2 className="mb-5 flex items-center gap-2 text-sm font-bold uppercase tracking-wider text-gray-400">
+            <Bot className="h-4 w-4" /> Personnalisation IA
+          </h2>
+
+          <div className="space-y-5">
+            <div>
+              <label className="mb-2 block text-sm font-medium text-gray-600">
+                Ton de la conversation
+              </label>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                {[
+                  { value: "formal", label: "Formel", desc: "Ton strict, vouvoiement, distance professionnelle" },
+                  { value: "balanced", label: "Équilibré", desc: "Professionnel et dynamique, empathique mais ferme" },
+                  { value: "friendly", label: "Amical", desc: "Chaleureux et bienveillant, ton accessible" },
+                ].map((opt) => (
+                  <button key={opt.value} type="button" onClick={() => setAiTone(opt.value)}
+                    className={`rounded-xl border p-3 text-left transition-all ${
+                      aiTone === opt.value
+                        ? "border-emerald-400 bg-emerald-50 ring-2 ring-emerald-100"
+                        : "border-gray-200 bg-gray-50 hover:border-gray-300"
+                    }`}>
+                    <p className={`text-sm font-semibold ${aiTone === opt.value ? "text-emerald-700" : "text-[#1e293b]"}`}>
+                      {opt.label}
+                    </p>
+                    <p className="mt-0.5 text-[11px] text-gray-500">{opt.desc}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label className="mb-1.5 flex items-center gap-1.5 text-sm font-medium text-gray-600">
+                <MessageSquare className="h-3.5 w-3.5" /> Instructions personnalisées
+              </label>
+              <textarea
+                value={aiNotes} onChange={(e) => setAiNotes(e.target.value)}
+                rows={4} maxLength={1000}
+                placeholder="Ex: Mentionnez toujours que l'agence est disponible pour un plan de paiement. Ne jamais menacer de poursuites juridiques. Toujours proposer un rendez-vous en agence..."
+                className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:border-emerald-400 focus:ring-2 focus:ring-emerald-100 transition-all resize-none"
+              />
+              <p className="mt-1 flex justify-between text-xs text-gray-400">
+                <span>Ces instructions seront suivies par l&apos;IA lors de chaque appel</span>
+                <span>{aiNotes.length}/1000</span>
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 flex justify-end">
+            <button
+              type="button" disabled={savingAI}
+              onClick={async () => {
+                setSavingAI(true);
+                try {
+                  await updateAIConfig({ ai_tone: aiTone, ai_custom_notes: aiNotes });
+                  toast.success("Configuration IA mise à jour");
+                } catch (err: unknown) {
+                  toast.error(err instanceof Error ? err.message : "Erreur de sauvegarde");
+                } finally {
+                  setSavingAI(false);
+                }
+              }}
+              className="flex items-center gap-2 rounded-xl bg-emerald-600 px-6 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700 disabled:opacity-50 transition-all"
+            >
+              {savingAI ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              {savingAI ? "Enregistrement..." : "Enregistrer la config IA"}
+            </button>
+          </div>
+        </div>
 
         {/* Notifications */}
         <div className="rounded-2xl border border-gray-200 bg-white p-6">
