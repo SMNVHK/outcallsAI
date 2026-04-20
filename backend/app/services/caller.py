@@ -335,8 +335,9 @@ async def _bridge_rtp_to_openai(
 
     MAX_CALL_DURATION = 300
     NO_INTERACTION_TIMEOUT = 45
-    HANGUP_GRACE_NORMAL = 2
-    HANGUP_GRACE_VOICEMAIL = 8
+    MAX_DRAIN_NORMAL = 8
+    MAX_DRAIN_VOICEMAIL = 12
+    POST_GOODBYE_WAIT = 15
 
     rtp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp_sock.bind(("0.0.0.0", listen_port))
@@ -349,6 +350,7 @@ async def _bridge_rtp_to_openai(
     playout_lock = asyncio.Lock()
     playout_started = False
     need_marker = True
+    hangup_reason = "conversation_ended"
     current_response_id = None
     current_output_item_id = None
     current_output_content_index = 0
@@ -395,6 +397,8 @@ async def _bridge_rtp_to_openai(
                     try:
                         data = await loop.sock_recv(rtp_sock, 4096)
                         if hanging_up:
+                            continue
+                        if not ai_first_response_done:
                             continue
                         if len(data) > 12:
                             audio_payload = data[12:]
@@ -471,7 +475,7 @@ async def _bridge_rtp_to_openai(
 
             # -- Task 3: OpenAI events → queue audio + handle events --
             async def openai_to_rtp():
-                nonlocal tenant_status, tenant_notes, call_active, hanging_up
+                nonlocal tenant_status, tenant_notes, call_active, hanging_up, hangup_reason
                 nonlocal human_speech_detected, ai_first_response_done, last_activity_time
                 nonlocal current_response_id, current_output_item_id, current_output_content_index
                 nonlocal played_item_id, played_audio_ms, playout_started, need_marker
@@ -514,6 +518,9 @@ async def _bridge_rtp_to_openai(
                         if hanging_up:
                             logger.info("Speech detected during hangup — ignoring (call ending)")
                             continue
+                        if not ai_first_response_done:
+                            logger.info("Speech detected during opening — ignoring barge-in (first response still playing)")
+                            continue
                         logger.info("Barge-in detected: tenant speech started, clearing local playback")
 
                         async with playout_lock:
@@ -544,6 +551,26 @@ async def _bridge_rtp_to_openai(
                         current_output_item_id = None
                         current_output_content_index = 0
 
+                        if hanging_up:
+                            max_drain = MAX_DRAIN_VOICEMAIL if hangup_reason == "voicemail" else MAX_DRAIN_NORMAL
+                            drain_start = asyncio.get_event_loop().time()
+                            logger.info(f"Hangup: response.done received, draining audio buffer (max {max_drain}s)...")
+                            while asyncio.get_event_loop().time() - drain_start < max_drain:
+                                async with playout_lock:
+                                    if len(playout_buffer) < RTP_SAMPLES_PER_FRAME:
+                                        break
+                                await asyncio.sleep(0.1)
+                            elapsed = asyncio.get_event_loop().time() - drain_start
+                            logger.info(f"Audio drained in {elapsed:.1f}s — waiting for remote hangup (max {POST_GOODBYE_WAIT}s)...")
+                            try:
+                                await asyncio.wait_for(call_ended_event.wait(), timeout=POST_GOODBYE_WAIT)
+                                logger.info("Remote hangup detected — clean exit")
+                            except asyncio.TimeoutError:
+                                logger.info(f"No remote hangup after {POST_GOODBYE_WAIT}s — disconnecting")
+                            call_active = False
+                            call_ended_event.set()
+                            break
+
                     elif evt_type == "response.function_call_arguments.done":
                         func_name = event.get("name", "")
                         try:
@@ -564,9 +591,9 @@ async def _bridge_rtp_to_openai(
 
                         elif func_name == "end_call":
                             reason = args.get("reason", "conversation_ended")
-                            grace = HANGUP_GRACE_VOICEMAIL if reason == "voicemail" else HANGUP_GRACE_NORMAL
-                            logger.info(f"AI requested end_call: reason={reason} grace={grace}s")
+                            logger.info(f"AI requested end_call: reason={reason}")
                             hanging_up = True
+                            hangup_reason = reason
                             await ws.send(json.dumps({
                                 "type": "conversation.item.create",
                                 "item": {
@@ -575,12 +602,8 @@ async def _bridge_rtp_to_openai(
                                     "output": json.dumps({"success": True, "action": "hanging_up"}),
                                 },
                             }))
-                            logger.info(f"Hanging up in {grace}s (letting audio finish)...")
-                            await asyncio.sleep(grace)
-                            logger.info("Grace period over — disconnecting")
-                            call_active = False
-                            call_ended_event.set()
-                            break
+                            logger.info("Hanging up — waiting for response.done to drain audio...")
+                            continue
 
                         await ws.send(json.dumps({
                             "type": "conversation.item.create",
