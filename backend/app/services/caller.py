@@ -388,6 +388,8 @@ async def _bridge_rtp_to_openai(
                 },
             }))
 
+            await ws.send(json.dumps({"type": "response.create"}))
+
             loop = asyncio.get_running_loop()
 
             # -- Task 1: RTP from Asterisk → OpenAI --
